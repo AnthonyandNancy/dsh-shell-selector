@@ -70,6 +70,8 @@
     "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-pwsh-local": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-bash": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-pwsh": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "react": "^18.2.0"
   },
@@ -89,6 +91,8 @@
     "@deepseek-ai/dsh-host-webserver": "0.1.0-rc.6",
     "@deepseek-ai/dsh-pwsh-local": "0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-bash": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-tool-pwsh": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.5",

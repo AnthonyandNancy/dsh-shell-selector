@@ -5,18 +5,59 @@ interpreter, why a restart is required, and how the pieces fit together.
 
 ## Product contract
 
-- **Agent Preset decides WHETHER there is Shell; Shell Selector decides WHICH
-  shell it is.**
+- **Preset determines WHETHER. Selector determines WHICH.** An Agent Preset
+  decides whether an agent has a Shell at all; Shell Selector decides which
+  shell that is.
 - **No hot switching.** Configuration changes are *persisted* and take effect
   on the *next process start*.
-- **No runtime replacement** of `ctx.shell`, **no** dynamic unload/load of
-  `tool-bash`/`tool-pwsh`, **no** forced restart, **no** "apply now".
+- **No runtime replacement** of `ctx.shell`, **no** hot-swapping of the host
+  executor, **no** forced restart, **no** "apply now".
 - **No preset coupling.** The plugin never sets `agent-presets.default`, never
-  ships a `shell-selector` agent preset, and never inspects preset names.
+  ships an agent preset of its own, and never inspects preset names.
+- **No self-written shell tools.** Bash and PowerShell always come from the
+  official `@deepseek-ai/dsh-tool-bash` / `@deepseek-ai/dsh-tool-pwsh` packages
+  resolved from the host runtime; the plugin never spawns a process itself.
 - The plugin must not modify the DSH main repository or `node_modules` of the
   app; it ships as a normal npm bundle installed with `dsh plugin add`.
 - Supported on Windows, macOS and Linux, with a Web Settings page that looks
   native (official slot + primitives/tokens) and zh-CN + en-US locales.
+
+## Two planes
+
+```text
+Host plane
+  Shell Selector settings
+  ↓
+  boot resolver (cordis.patch.yml expressions)
+  ↓
+  bash-sandbox / pwsh-sandbox   (exactly one)
+  ↓
+  ctx.shell
+
+Agent plane
+  Preset composition
+  ↓
+  Does this agent have standard shell capability?
+  ↓
+  NO  → no shell (permission boundary; nothing is added)
+  YES
+  ↓
+  Shell Selector active shell
+  ↓
+  ensure matching official shell tool   (ADD)
+  ↓
+  verify it is visible
+  ↓
+  hide opposite shell tool              (REMOVE, only after the add)
+  ↓
+  shadow opposite `tool:*` prompt section
+  ↓
+  verify final state
+```
+
+The two planes are deliberately separate. The bundle patch decides the *host*
+executor; it must never be used to force `tool-bash`/`tool-pwsh` on globally,
+because that would give a no-shell preset a shell.
 
 ## Why restart is required
 
@@ -27,8 +68,8 @@ The shell stack is a *boot-time composition decision*:
   provides `ctx.shell`; DSH ships the platform rule by disabling one of them
   per platform.
 - Each session's tool list is composed by the agent-preset service from the
-  preset it mounts. Shell Selector only restricts the tool that does not match
-  the already-active executor.
+  preset it mounts. Shell Selector aligns that agent's shell tool with the
+  already-active executor.
 
 Replacing that stack in a running process would mean disposing and re-activing
 platform services (the sandbox executors keep per-process state such as
@@ -80,8 +121,8 @@ change at any time while the process runs. The state builder computes:
 - `fallback-none` — fallback mode with no shell available anywhere
   (`fallback-unavailable`).
 
-There is no `gatedByPreset` state. The capability question belongs to the
-agent preset composition, not to Shell Selector.
+The capability question belongs to the agent preset composition, not to Shell
+Selector, so no state in this plugin describes it.
 
 ## The boot composition (how the swap actually happens)
 
@@ -123,20 +164,100 @@ replace only the keys they list).
 
 ### 2. Agent-scoped Shell Tool adaptation
 
-The host plugin registers one `agent/created` listener. At that point the
-agent has already mounted its preset's standing scope, so `tools.view(agent)`
-reflects the preset's actual composition — without inspecting names. The
-listener:
+Owned by `src/agent-shell.ts` (the algorithm) and `src/agent/install.ts` (the
+lifecycle wiring). All rc.6 structural knowledge is isolated in
+`src/compat/rc6-agent.ts`.
 
-- reads the **active boot shell kind** (immutable per process),
-- checks whether the agent has `bash` and/or `pwsh` visible,
-- does nothing if neither is visible (no capability grant),
-- otherwise calls `tools.restrict({ deny: [<the non-matching tool>] })` on the
-  agent's scope.
+#### The algorithm
 
-This guarantees the model-facing tool (`tool-bash` or `tool-pwsh`) matches the
-host executor (`ctx.shell`) for every shell-capable agent. Because the
-restriction is registered on the agent scope, it is disposed with the agent.
+On `agent/created` the agent has already joined its preset's standing scope, so
+`tools.view(agent)` reflects the preset's actual composition — without inspecting
+any name. Then, in this exact order:
+
+| Step | Action | Why the order matters |
+|---|---|---|
+| 1 | `inspectShellCapability()` | Read `bash`/`pwsh` visibility **before** mutating; this is the preset's grant. |
+| 2 | `ensureTargetShellTool()` | Mount the official target plugin on `agent.ctx` if missing. **ADD** |
+| 3 | verify target visible | Refuse to proceed on a tool that did not actually register. |
+| 4 | `hideOppositeShellTool()` | `tools.restrict({ deny: [opposite] })`. **REMOVE, never before step 3** |
+| 5 | `shadowOppositeShellPrompt()` | Register an empty same-named `tool:*` section. |
+| 6 | `verifyAgentShell()` | Target visible, opposite hidden. |
+
+If step 1 finds no shell capability the adaptation returns
+`NOOP_NO_CAPABILITY` and adds nothing — a no-shell preset stays a no-shell
+preset. Any failure in steps 2-6 rolls back every effect registered in that
+transaction and throws `ShellSelectorAgentAdaptationError`, so a half-adapted
+agent scope cannot exist.
+
+**Why ADD BEFORE REMOVE.** The original defect was the reverse order. On a
+Windows preset exposing only `pwsh`, with Bash selected, the old code restricted
+`pwsh` without ever registering `bash`, leaving the agent with an **empty** shell
+catalog. A router preset that picks its platform shell from the catalog then
+failed with `router-bootstrap: no platform shell in catalog` — a second-order
+symptom of this plugin's bug, not a router bug.
+
+#### Official tools only
+
+The target is always the official rc.6 plugin, imported by bare specifier so it
+resolves from the **host** runtime:
+
+- `@deepseek-ai/dsh-tool-bash`
+- `@deepseek-ai/dsh-tool-pwsh`
+
+Declared as `peerDependencies` (plus `devDependencies` for tests) so the plugin
+never bundles a second DSH runtime copy. This is what preserves `ctx.shell`,
+sandbox and `sandbox_permissions`, user approval, jobs and background execution,
+timeouts, cancellation, `shellEnv`, result rendering and the terminal UI.
+
+Windows PowerShell and PowerShell 7 share the single model-facing `pwsh` tool;
+no second `powershell` tool is ever created. The difference is the executable
+the host executor spawns.
+
+#### Scoping
+
+Everything is registered through `agent.ctx`, never the root context: the mount,
+the restriction and the prompt shadow all live in the agent's own layer and are
+disposed with the agent. Verified in rc.6: an agent-scope registration is
+invisible to the global layer and to sibling agents, so two agents adapt
+independently with no duplicate registration.
+
+#### Prompt alignment
+
+In DSH the tool schema and the system prompt are **two independent composition
+inputs**. Hiding the `pwsh` tool does not remove `tool:pwsh` guidance. The
+adaptation therefore shadows the opposite section by **identity** — an empty
+same-named section on the agent scope, which rc.6 drops when rendering. The
+plugin never rewrites prompt prose with string or regex replacement.
+
+#### The prompt-assembly barrier
+
+Two verified rc.6 facts require an enforcement point beyond `agent/created`:
+
+- `agent/created` is dispatched with a fire-and-forget `emit`, so a rejected
+  async listener is only logged — it cannot fail agent creation;
+- mounting a tool plugin is asynchronous (`ctx.plugin()` activates one microtask
+  later), so the adaptation cannot complete synchronously in that listener.
+
+So the adaptation is *started* in `agent/created` and *enforced* in an
+agent-scoped `system-prompt/assemble` listener — the one hook that is both
+awaited and ahead of every model request, and that produces the tool schema and
+the prompt together. The barrier:
+
+- awaits the adaptation, and **throws** `ShellSelectorAgentAdaptationError` if it
+  failed, so the session fails with the real cause before any LLM request;
+- re-derives the shell rows from the live tool view and drops the opposite
+  `tool:*` section, because rc.6 computes `assembly.tools` and
+  `assembly.sections` *before* running the waterfall — a listener sees a
+  snapshot taken at entry.
+
+Because a preset registers its own `system-prompt/assemble` hook on the standing
+scope before any agent scope exists, this agent-scope barrier always runs nested
+**inside** it. The corrected catalog is therefore what the preset's
+`await next()` observes, which is what fixes the router at the source.
+
+In Code Mode the wire surface carries `run_code` and the shells live in the SDK
+catalog, so the barrier does not append a shell to the wire schema; the SDK-facing
+catalog still follows the selector because it derives from the same tool view.
 
 ### 3. Settings namespace
 
@@ -234,8 +355,18 @@ only re-scans — it never touches the runtime stack.**
 
 - `resolver.test.ts` / `fallback.test.ts` / `restart-required.test.ts` — the
   decision logic and the semantic restart computation.
-- `agent-shell.test.ts` — per-agent tool restriction, including no-capability
-  no-op and no-preset-name coupling.
+- `agent-shell.test.ts` — the full preset × selector state table (cases A-G),
+  ADD-BEFORE-REMOVE ordering, the never-empty-catalog invariant, transactional
+  rollback, two-agent isolation, and no-preset-name coupling.
+- `router-bootstrap.test.ts` — reproduces the Agent Router's platform-shell
+  selection and pins that a shell-capable agent always keeps one, that a failed
+  adaptation does not degrade into "no platform shell", and that a no-shell
+  preset is not escalated to satisfy a router.
+- `agent-prompt.test.ts` — tool/prompt alignment in both directions, shadowing
+  by identity rather than prose rewriting, and the Code Mode wire surface.
+- `agent-install.test.ts` — the lifecycle wiring: the barrier is registered on
+  the agent scope, completes the adaptation before the assembly a request is
+  built from, raises rather than swallows failures, and adapts once per agent.
 - `detector.test.ts` — fabricated PATH/ProgramFiles/SystemRoot trees, Git Bash
   discovery, WSL rejection, probe failure, and de-duplication.
 - `settings.test.ts` — schemastery v3 validation semantics.
@@ -252,18 +383,21 @@ only re-scans — it never touches the runtime stack.**
 ## File map
 
 ```
-src/index.ts            host apply(): settings, snapshot, PATH prepend, agent listener, endpoint
+src/index.ts            host apply(): settings, snapshot, PATH prepend, agent adaptation, endpoint
 src/settings.ts         namespace, schema, validation, normalization
 src/resolver.ts         decision mirror (pure, platform-parameterized)
 src/boot/expressions.ts single source of the boot expressions
 src/boot/*.template     patch template (placeholders)
 src/detector.ts         availability + version probing (Git Bash aware)
 src/runtime-snapshot.ts immutable active-shell snapshot
-src/agent-shell.ts      per-agent shell-tool restriction
+src/agent-shell.ts      the adaptation algorithm (capability→ensure→verify→hide→shadow→verify)
+src/agent/install.ts    lifecycle wiring + the prompt-assembly barrier
+src/compat/rc6-agent.ts the ONLY module that speaks to DSH rc.6 internals
 src/web.ts              state/action endpoints, detection cache
 src/types.ts            shared host types
 src/client/*            Web plugin: locale, controller, DshSelect, page, entry
 cordis.patch.yml        shipped bundle patch (rendered)
 scripts/*               clean-build, renderer, client bundler, lint
-tests/*                 unit + boot-expression + client contract suites
+tests/*                 unit + boot-expression + agent + client contract suites
+tests/helpers/*         the rc.6-faithful fake agent host
 ```

@@ -26,7 +26,7 @@ import { bashAvailability, pwshAvailability, windowsPowerShellAvailability } fro
 import { resolveEffective, resolvedShellKind, type EffectiveDecision } from './resolver.js'
 import { createRuntimeSnapshot } from './runtime-snapshot.js'
 import { DetectionCache, installShellSelectorWeb, type ShellSelectorBackend } from './web.js'
-import { adaptAgentShell, type AgentLike } from './agent-shell.js'
+import { installAgentShellAdaptation } from './agent/install.js'
 
 /** Stable Cordis plugin name (the bundle patch inserts a row with this package). */
 export const name = 'shell-selector'
@@ -110,16 +110,12 @@ export function apply(ctx: Context): () => void {
 
   prepareBashPath(platform, bootActiveKind)
 
-  // Agent capability is decided by each preset's composition; this listener
-  // only hides the shell tool that does not match the active executor. It runs
-  // before the first prompt and never grants Shell to a preset without it.
-  ;(ctx as Context & { on(event: string, listener: (payload: { agent: AgentLike }) => void): unknown }).on('agent/created', (payload) => {
-    try {
-      adaptAgentShell(payload.agent, bootActiveKind)
-    } catch (error) {
-      ctx.logger.warn('dsh-shell-selector: failed to adapt agent shell tool: %s', String(error))
-    }
-  })
+  // Agent plane: each preset's composition decides WHETHER an agent holds the
+  // standard Shell capability; this adaptation decides WHICH dialect it speaks.
+  // It adds the target tool before removing the mismatched one, keeps the tool
+  // schema and the prompt in step, and fails the session loudly rather than
+  // letting an agent reach the model with a wrong or empty shell surface.
+  installAgentShellAdaptation(ctx, bootActiveKind)
 
   const revisionOf = (): number => {
     const descriptor = ctx.settings.describe().find((row) => row.ns === SHELL_SELECTOR_SETTINGS_NAMESPACE)

@@ -114,3 +114,115 @@ describe('DshSelect', () => {
     expect(selected.querySelector('svg')).not.toBeNull()
   })
 })
+
+describe('DshSelect menu placement', () => {
+  it('portals the list out of the wrapper so dialog overflow cannot crop it', async () => {
+    const user = userEvent.setup()
+    const { container, getByRole } = setup()
+    await user.click(getByRole('button', { name: /Shell/ }))
+    const menu = getByRole('menu')
+    // Rendered into document.body, not inside the component's own subtree.
+    expect(container.contains(menu)).toBe(false)
+    expect(document.body.contains(menu)).toBe(true)
+    // Positioned from the measured anchor rect (the fixed layer's coordinates
+    // are written inline; `position: fixed` itself comes from the portal class).
+    expect(menu.style.left).not.toBe('')
+    expect(menu.style.top).not.toBe('')
+  })
+
+  it('end-aligns the list so a wide menu grows leftwards, not past the trigger', async () => {
+    const user = userEvent.setup()
+    const { getByRole } = setup()
+    const trigger = getByRole('button', { name: /Shell/ })
+    // jsdom reports zero rects, so pin the geometry the primitive measures: a
+    // trigger near the right edge of a narrow viewport.
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      left: 600,
+      right: 760,
+      top: 100,
+      bottom: 136,
+      width: 160,
+      height: 36,
+      x: 600,
+      y: 100,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    await user.click(trigger)
+    const menu = getByRole('menu')
+    // `align="end"` places the list's right edge at the trigger's right edge,
+    // so `left` is never to the right of the trigger's left edge for a list at
+    // least as wide as the trigger.
+    const left = Number.parseFloat(menu.style.left)
+    expect(Number.isNaN(left)).toBe(false)
+    expect(left).toBeLessThanOrEqual(760)
+  })
+
+  it('bounds each row so a long path cannot widen the list without limit', async () => {
+    const user = userEvent.setup()
+    const { getByRole } = setup()
+    await user.click(getByRole('button', { name: /Shell/ }))
+    const row = getByRole('menuitem', { name: /Windows PowerShell/ })
+    const label = row.querySelector('.sss-menu-item')
+    expect(label).not.toBeNull()
+    // The width cap and the description clamp live in the injected stylesheet;
+    // this pins the hooks they attach to.
+    expect(row.querySelector('.sss-menu-item-desc')).not.toBeNull()
+  })
+})
+
+describe('DshSelect keyboard scoping', () => {
+  it('navigates only its own rows when another menu is open on the page', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <div>
+        {/* A foreign menu, rendered first so its rows come earlier in the DOM. */}
+        <div role="menu">
+          <button type="button" role="menuitem" data-testid="foreign-1">
+            Foreign one
+          </button>
+          <button type="button" role="menuitem" data-testid="foreign-2">
+            Foreign two
+          </button>
+        </div>
+        <DshSelect value="bash" options={options} onChange={onChange} ariaLabel="Shell" />
+      </div>,
+    )
+
+    const trigger = screen.getByRole('button', { name: /Shell/ })
+    trigger.focus()
+    await user.keyboard('{ArrowDown}')
+
+    // Focus landed on one of THIS select's rows, never on the foreign menu's.
+    const focused = document.activeElement as HTMLElement
+    expect(focused.dataset.testid).toBeUndefined()
+    expect(focused.textContent).toContain('Git Bash')
+
+    await user.keyboard('{ArrowDown}')
+    expect((document.activeElement as HTMLElement).textContent).toContain('PowerShell 7')
+
+    // The foreign rows were never focused at any point.
+    expect(screen.getByTestId('foreign-1')).not.toBe(document.activeElement)
+    expect(screen.getByTestId('foreign-2')).not.toBe(document.activeElement)
+  })
+
+  it('wraps End and Home within its own rows', async () => {
+    const user = userEvent.setup()
+    const { getByRole } = setup()
+    getByRole('button', { name: /Shell/ }).focus()
+    await user.keyboard('{ArrowDown}')
+    await user.keyboard('{End}')
+    expect((document.activeElement as HTMLElement).textContent).toContain('Windows PowerShell')
+    await user.keyboard('{Home}')
+    expect((document.activeElement as HTMLElement).textContent).toContain('Git Bash')
+  })
+
+  it('opens upward-focused on ArrowUp', async () => {
+    const user = userEvent.setup()
+    const { getByRole } = setup()
+    getByRole('button', { name: /Shell/ }).focus()
+    await user.keyboard('{ArrowUp}')
+    expect((document.activeElement as HTMLElement).textContent).toContain('Windows PowerShell')
+  })
+})

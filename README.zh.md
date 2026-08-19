@@ -19,15 +19,37 @@
 
 ## 产品契约
 
-> **Agent Preset 决定有没有 Shell；Shell Selector 决定 Shell 是谁。**
+> **Preset determines WHETHER. Selector determines WHICH.**
+>
+> Agent Preset 决定有没有 Shell；Shell Selector 决定 Shell 是谁。
 
-- Shell Selector 不会设置 `agent-presets.default`，不会提供
-  `shell-selector` 专属 Agent Preset，也不会按 preset 名称判断。
-- 未挂载 `tool-bash` / `tool-pwsh` 的 preset 不会因为本插件获得 Shell
-  能力。
-- 挂载了标准 Shell 工具的 preset 只会得到与当前 Shell 匹配的工具：
-  Bash 生效 → `tool-bash`；PowerShell 生效 → `tool-pwsh`。不匹配的工具会
-  通过 `tools.restrict()` 在 agent 作用域内隐藏。
+- Shell Selector 不会设置 `agent-presets.default`，不会提供专属 Agent
+  Preset，也不会按 preset 名称判断。
+- 未挂载 `tool-bash` / `tool-pwsh` 的 preset **不会**因为本插件获得 Shell
+  能力。这是权限边界，不是便利默认值。
+- 挂载了标准 Shell 工具的 preset 只会得到与当前 Shell 匹配的工具。在
+  Windows 上，原本只暴露 `pwsh` 的 preset 在选择 Bash 后，最终 `bash` 可见、
+  `pwsh` 隐藏——目标工具先**添加**、不匹配的工具后**移除**，因此有 Shell
+  权限的 agent 绝不会变成零 Shell。
+- 工具与提示词严格同步：Bash 工具不会配 PowerShell 指引，反之亦然。
+- PowerShell 7 与 Windows PowerShell 共用同一个面向模型的 `pwsh` 工具，
+  区别只在宿主执行器实际调用哪个可执行文件。
+
+### 单个 Agent 的适配流程
+
+对每个 agent，按此顺序：
+
+1. **能力检测** — 在任何修改**之前**读取工具视图。既无 `bash` 也无 `pwsh`
+   即无 Shell 能力，直接返回。
+2. **确保目标** — 若当前 Shell 对应的工具缺失，在 agent 自己的作用域挂载官方
+   `@deepseek-ai/dsh-tool-bash` / `@deepseek-ai/dsh-tool-pwsh` 插件。
+3. **验证目标** — 确认其确实可见。
+4. **隐藏对侧** — 只有此时才限制另一种方言的工具。
+5. **遮蔽对侧提示词** — 按 section 身份将其 `tool:*` 段置空。
+6. **验证最终状态** — 目标可见、对侧隐藏。
+
+任何失败都会回滚整个事务，并以 `ShellSelectorAgentAdaptationError` 明确报错。
+插件绝不会只打一条 warning 就让 agent 带着错误或空的 Shell 继续运行。
 
 ## 为什么需要重启？
 
@@ -75,13 +97,13 @@ Shell 替换发生在**进程启动时的组合层**：
    `pwsh-sandbox` 执行器行在启动时读取已保存配置，只启用其中一个。显式
    选择 Windows PowerShell 时固定其可执行文件路径。
 2. **宿主插件**（`src/index.ts`）— 捕获启动快照；在需要时为 Git Bash
-   目录加入进程级 `PATH`；注册 `agent/created` 监听，为每个有 Shell 能力
-   的 agent 隐藏不匹配的 Shell 工具。
+   目录加入进程级 `PATH`；安装上文所述的单 Agent Shell 工具适配。
 3. **设置命名空间**（`shell-selector`，`mode: default|fallback|explicit`，
    `shell: bash|pwsh|powershell`）— 通过设置服务持久化。
 
-**不** 在运行时替换 `ctx.shell`，**不** 动态加载/卸载
-`tool-bash` / `tool-pwsh`，**不** 强制重启，**不** 修改默认 Agent Preset。
+**不** 在运行时替换 `ctx.shell`，**不** 热切换宿主执行器，**不** 强制重启，
+**不** 修改默认 Agent Preset。Bundle patch 只管**宿主**层；Agent 工具面按
+agent 作用域处理，因此没有 Shell 权限的 preset 不会被全局 patch 提权。
 
 ### Windows 上的 Git Bash
 

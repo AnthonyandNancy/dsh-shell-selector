@@ -28,38 +28,41 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 const NS = 'shell-selector'
 
 const CSS = `
-.sss-section{max-width:720px;color:var(--dsw-alias-label-primary);flex-direction:column;gap:12px;display:flex}
+.sss-section{max-width:720px;min-width:0;box-sizing:border-box;color:var(--dsw-alias-label-primary);flex-direction:column;gap:12px;display:flex}
 .sss-title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
 .sss-intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}
-.sss-rows{display:grid;gap:16px;padding:4px 0}
-.sss-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.sss-row-text{display:grid;gap:2px;min-width:180px;flex:1 1 240px}
-.sss-row-label{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
-.sss-row-desc{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
-.sss-select{display:inline-flex;flex:0 0 auto}
-.sss-select-trigger{max-width:260px}
-.sss-select-trigger-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sss-select-chevron{margin-left:6px;color:var(--dsw-alias-label-tertiary)}
-.sss-menu-item{display:grid;gap:2px;min-width:180px}
-.sss-menu-item-label{font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary)}
-.sss-menu-item-desc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+.sss-rows{display:grid;gap:16px;padding:4px 0;min-width:0}
+.sss-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;min-width:0;max-width:100%;box-sizing:border-box}
+.sss-row-text{display:grid;gap:2px;min-width:0;flex:1 1 240px}
+.sss-row-label{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}
+.sss-row-desc{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}
+.sss-select{display:inline-flex;flex:0 0 auto;min-width:0;max-width:100%;box-sizing:border-box}
+.sss-select-trigger{max-width:260px;min-width:0;box-sizing:border-box}
+.sss-select-trigger-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sss-select-chevron{margin-left:6px;flex:0 0 auto;color:var(--dsw-alias-label-tertiary)}
+/* The menu is portalled and end-aligned; bound its width so a long option
+   description cannot make the list wider than the Settings dialog. */
+.sss-menu-item{display:grid;gap:2px;min-width:0;max-width:296px}
+.sss-menu-item-label{font-size:13px;line-height:18px;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sss-menu-item-desc{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
 .sss-restart-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .sss-capability-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
-.sss-status{display:grid;gap:6px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:10px 12px}
-.sss-status-row{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
-.sss-status-label{font-size:11px;color:var(--dsw-alias-label-caption);min-width:64px}
-.sss-status-value{font-size:13px;color:var(--dsw-alias-label-primary)}
+.sss-status{display:grid;gap:6px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:10px 12px;min-width:0;max-width:100%;box-sizing:border-box}
+.sss-status-row{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;min-width:0}
+.sss-status-label{font-size:11px;color:var(--dsw-alias-label-caption);min-width:64px;flex:0 0 auto}
+.sss-status-value{font-size:13px;color:var(--dsw-alias-label-primary);min-width:0;overflow-wrap:anywhere}
 .sss-warning{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 .sss-saved{color:var(--dsw-alias-state-success-primary);margin:0;font-size:12px;line-height:18px}
 .sss-error{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:18px}
 .sss-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .sss-readonly{font-size:11px;color:var(--dsw-alias-label-caption)}
-.sss-detected{display:grid;gap:4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption)}
+.sss-detected{display:grid;gap:4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption);min-width:0;max-width:100%;box-sizing:border-box}
 .sss-detected-label{color:var(--dsw-alias-label-tertiary)}
-.sss-detected-row{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.sss-detected-name{font-size:12px;color:var(--dsw-alias-label-primary)}
-.sss-detected-path{font-size:11px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
-.sss-detected-version{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.sss-detected-row{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;min-width:0;max-width:100%;box-sizing:border-box}
+.sss-detected-name{font-size:12px;color:var(--dsw-alias-label-primary);flex:0 0 auto}
+/* A full Windows PowerShell path must never widen the dialog. */
+.sss-detected-path{font-size:11px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 auto;max-width:100%}
+.sss-detected-version{font-size:11px;color:var(--dsw-alias-label-tertiary);flex:0 0 auto}
 .sss-detected-none{color:var(--dsw-alias-label-tertiary)}
 .sss-loading{padding:24px;border-radius:12px;background:var(--dsw-alias-bg-layer-2);font-size:12px;color:var(--dsw-alias-label-secondary)}
 `
