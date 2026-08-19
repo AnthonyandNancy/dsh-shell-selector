@@ -1,0 +1,7 @@
+name: Shell Selector
+description: >-
+  与官方 standard 预设一致，但 Shell 工具跟随 dsh-shell-selector 插件的配置
+  （Bash / PowerShell 7 / Windows PowerShell）。mode=default 时与 standard
+  行为完全相同。— Identical to the standard preset, except the shell tools
+  follow the Shell Selector settings; mode=default behaves exactly like standard.
+order: 1

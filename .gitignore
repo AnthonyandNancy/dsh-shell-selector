@@ -1,0 +1,6 @@
+node_modules/
+lib/
+.client-build/
+*.tgz
+.npm-cache-tmp/
+.DS_Store

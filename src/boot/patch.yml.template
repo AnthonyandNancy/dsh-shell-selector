@@ -1,0 +1,41 @@
+# dsh-shell-selector bundle patch — applied after every bundle layer, before
+# profile / home / --patch overlays.
+#
+# THE SHELL STACK IS DECIDED AT PROCESS STARTUP, NEVER AT RUNTIME. The `!!js`
+# expressions below read `$DSH_HOME/settings.yaml` once, while the loader
+# activates these rows; nothing in this file runs after boot.
+#
+# The expressions are GENERATED from src/boot/expressions.ts by
+# scripts/render-patch.mjs — do not edit them by hand. They are evaluated by
+# the Loader with `new Function("ctx","expr","with(ctx){return eval(expr)}")`
+# where only `process`/`Buffer`/`fetch`/`globalThis` are guaranteed.
+
+# Mount the host plugin (settings, snapshot, preset bootstrap, Settings
+# endpoint). Without this row the bundle's patch lines would apply but the
+# plugin itself would never load.
+- insert:
+    - id: shell-selector
+      name: 'dsh-shell-selector'
+
+# Executor rows (host plane): `ctx.shell` is provided by exactly one of them.
+# mode=default keeps the shipped platform rule; the config can only change
+# them for the next process.
+- id: bash-sandbox
+  disabled: !!js |
+    {{BASH_SANDBOX_DISABLED_EXPR}}
+
+- id: pwsh-sandbox
+  disabled: !!js |
+    {{PWSH_SANDBOX_DISABLED_EXPR}}
+  config:
+    pwshPath: !!js |
+      {{PWSH_PATH_EXPR}}
+
+# Sessions compose from the `shell-selector` agent preset (a faithful copy of
+# the standard preset whose tool rows follow the same expressions). The
+# composeProfile overlay preserves every other agent-presets key; only the
+# default preset id changes. Users who explicitly chose another preset keep
+# their choice — the shell override is inert for their sessions.
+- id: agent-presets
+  config:
+    default: shell-selector
