@@ -4,9 +4,8 @@
  * `dsh-shell-selector` changes the shell stack at PROCESS STARTUP — never at
  * runtime. The swap happens in the composition layer, where the loader
  * evaluates `!!js` expressions while activating the executor rows
- * (`bash-sandbox` / `pwsh-sandbox`) and the agent-preset tool rows
- * (`tool-bash` / `tool-pwsh`). Those expressions cannot import anything: the
- * loader evaluates them with `new Function("ctx", "expr", "with(ctx){return
+ * (`bash-sandbox` / `pwsh-sandbox`). Those expressions cannot import anything:
+ * the loader evaluates them with `new Function("ctx", "expr", "with(ctx){return
  * eval(expr)}")` inside a bare Cordis context where only `process`, `Buffer`,
  * `fetch` and `globalThis` exist. Everything below is therefore one
  * self-contained JavaScript block, evaluated verbatim by the Loader.
@@ -28,8 +27,6 @@ export type BootKind = 'platform' | 'bash' | 'pwsh' | 'powershell'
 export interface BootConfig {
   mode: 'default' | 'fallback' | 'explicit'
   shell?: 'bash' | 'pwsh' | 'powershell'
-  /** True when the user explicitly chose another agent preset: the override is inert. */
-  gated: boolean
 }
 
 /**
@@ -54,11 +51,9 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
     const file = path.join(home, 'settings.yaml');
     const sectionOf = (root) => {
       const section = root && typeof root === 'object' && !Array.isArray(root) ? root['shell-selector'] : undefined;
-      const gate = root && typeof root === 'object' && !Array.isArray(root) ? root['agent-presets'] : undefined;
       return {
         mode: section && typeof section === 'object' ? section['mode'] : undefined,
-        shell: section && typeof section === 'object' ? section['shell'] : undefined,
-        gated: gate && typeof gate === 'object' && typeof gate['default'] === 'string' && gate['default'] !== 'shell-selector'
+        shell: section && typeof section === 'object' ? section['shell'] : undefined
       };
     };
     try {
@@ -70,11 +65,10 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
       let inSection = false;
       let mode = 'default';
       let shell = undefined;
-      let gated = false;
       for (const raw of lines) {
         const line = raw.replace(/\s+$/u, '');
         if (/^[A-Za-z0-9_-]+:\s*$/u.test(line)) {
-          inSection = line === 'shell-selector:' || line === 'agent-presets:';
+          inSection = line === 'shell-selector:';
           continue;
         }
         if (!inSection) continue;
@@ -86,11 +80,10 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
         const value = m[2].replace(/^["']|["']$/gu, '');
         if (key === 'mode' && (value === 'fallback' || value === 'explicit')) mode = value;
         else if (key === 'shell') shell = value;
-        else if (key === 'default') gated = value !== 'shell-selector';
       }
-      return { mode, shell, gated };
+      return { mode, shell };
     } catch (err) {
-      return { mode: 'default', shell: undefined, gated: false };
+      return { mode: 'default', shell: undefined };
     }
   };
   const dshSsrPathDirs = () => {
@@ -111,13 +104,80 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
     return undefined;
   };
   const dshSsrSystemRoot = () => String(process.env.SystemRoot || process.env.windir || 'C:\\Windows');
-  const dshSsrHasBash = () => {
-    if (process.platform !== 'win32') return true;
+  const dshSsrIsWslBash = (p) => {
     const path = process.getBuiltinModule('node:path');
-    const found = dshSsrResolveInPath('bash.exe', []);
-    if (!found) return false;
-    const wsl = path.join(dshSsrSystemRoot(), 'System32', 'bash.exe');
-    return found.toLowerCase() !== wsl.toLowerCase();
+    return path.resolve(p).toLowerCase() === path.resolve(path.join(dshSsrSystemRoot(), 'System32', 'bash.exe')).toLowerCase();
+  };
+  const dshSsrBashProbeOk = (file) => {
+    let cp;
+    try {
+      cp = process.getBuiltinModule('node:child_process');
+    } catch (err) {
+      return false;
+    }
+    try {
+      const version = cp.spawnSync(file, ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: process.env });
+      if (!version || version.status !== 0) return false;
+      const probe = cp.spawnSync(file, ['-c', 'printf "%s" "$BASH_VERSION"'], { encoding: 'utf8', timeout: 5000, windowsHide: true, env: process.env });
+      if (!probe || probe.status !== 0) return false;
+      return String(probe.stdout || '').trim().length > 0;
+    } catch (err) {
+      return false;
+    }
+  };
+  const dshSsrBashCandidates = () => {
+    const path = process.getBuiltinModule('node:path');
+    const fs = process.getBuiltinModule('node:fs');
+    const isFile = (p) => {
+      try {
+        const st = fs.statSync(p);
+        return st.isFile() || st.isSymbolicLink();
+      } catch (err) { return false; }
+    };
+    const list = [];
+    const seen = new Set();
+    const add = (p, source) => {
+      if (!isFile(p) || dshSsrIsWslBash(p)) return;
+      const key = path.resolve(p).toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push({ path: path.resolve(p), source });
+    };
+    const addRoot = (root, source) => {
+      add(path.join(root, 'bin', 'bash.exe'), source);
+      add(path.join(root, 'usr', 'bin', 'bash.exe'), source);
+    };
+    for (const dir of dshSsrPathDirs()) add(path.join(dir, 'bash.exe'), 'path');
+    for (const dir of dshSsrPathDirs()) {
+      const git = path.join(dir, 'git.exe');
+      if (!isFile(git)) continue;
+      addRoot(path.resolve(dir, '..'), 'git-for-windows');
+    }
+    const pf = String(process.env.ProgramFiles || 'C:\\Program Files');
+    const pf86 = String(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)');
+    addRoot(path.join(pf, 'Git'), 'git-for-windows');
+    addRoot(path.join(pf86, 'Git'), 'git-for-windows');
+    const local = process.env.LOCALAPPDATA;
+    if (local) addRoot(path.join(local, 'Programs', 'Git'), 'git-for-windows');
+    return list;
+  };
+  const dshSsrHasBash = () => {
+    if (process.platform !== 'win32') {
+      const path = process.getBuiltinModule('node:path');
+      const fs = process.getBuiltinModule('node:fs');
+      for (const dir of dshSsrPathDirs().concat(['/bin', '/usr/bin', '/usr/local/bin'])) {
+        const full = path.join(dir, 'bash');
+        try {
+          const st = fs.statSync(full);
+          if ((st.isFile() || st.isSymbolicLink()) && dshSsrBashProbeOk(full)) return true;
+        } catch (err) {}
+      }
+      return false;
+    }
+    for (const candidate of dshSsrBashCandidates()) {
+      if (dshSsrBashProbeOk(candidate.path)) return true;
+    }
+    return false;
   };
   const dshSsrHasPwsh = () => {
     if (process.platform !== 'win32') {
@@ -144,7 +204,7 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
   };
   const dshSsrEffective = () => {
     const cfg = dshSsrReadConfig();
-    if (cfg.gated || cfg.mode === 'default') return { kind: 'platform' };
+    if (cfg.mode === 'default') return { kind: 'platform' };
     if (process.platform === 'win32') {
       if (cfg.mode === 'fallback') {
         if (dshSsrHasBash()) return { kind: 'bash' };
@@ -157,7 +217,7 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
       if (cfg.shell === 'powershell') return dshSsrHasWindowsPowerShell() ? { kind: 'powershell' } : { kind: 'platform' };
       return { kind: 'platform' };
     }
-    if (cfg.mode === 'explicit' && cfg.shell === 'bash') return { kind: 'bash' };
+    if (cfg.mode === 'explicit' && cfg.shell === 'bash') return dshSsrHasBash() ? { kind: 'bash' } : { kind: 'platform' };
     return { kind: 'platform' };
   };
   const eff = dshSsrEffective();
@@ -186,12 +246,6 @@ export const PWSH_SANDBOX_DISABLED_EXPR = `${EXPRESSION_HELPERS}  return eff.kin
  */
 export const PWSH_PATH_EXPR = `${EXPRESSION_HELPERS}  return eff.kind === 'powershell' ? dshSsrWindowsPowerShellFile() : undefined;
 })()`
-
-/** `tool-bash.disabled` inside the `shell-selector` agent preset. */
-export const TOOL_BASH_DISABLED_EXPR = BASH_SANDBOX_DISABLED_EXPR
-
-/** `tool-pwsh.disabled` inside the `shell-selector` agent preset. */
-export const TOOL_PWSH_DISABLED_EXPR = PWSH_SANDBOX_DISABLED_EXPR
 
 /** True when a config read means "leave the platform rule in charge". */
 export function isPlatformDecision(kind: BootKind): boolean {

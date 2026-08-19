@@ -42,10 +42,6 @@ export interface ShellSelectorBackend {
   detected(): DetectedShell[]
   /** Kick a fresh detection sweep; resolves when the sweep settles. */
   refreshDetection(): Promise<void>
-  /** The gate: another agent preset explicitly chosen by the user. */
-  isGated(): boolean
-  /** The user-chosen default agent preset id, when known. */
-  defaultAgentPreset(): string | undefined
   /** Settings revision, for save-with-conflict-detection. */
   revision(): number
   writable(): boolean
@@ -101,12 +97,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function buildState(backend: ShellSelectorBackend): ShellSelectorState {
   const configured = backend.settings.get()
   const availability = backend.availability()
-  const gated = backend.isGated()
-  const next = resolveEffective(configured, backend.platform, availability, gated)
+  const next = resolveEffective(configured, backend.platform, availability)
   const activeMissing = !availability[backend.snapshot.kind]
   const configuredMissing = next.reason === 'explicit-unavailable'
   const restartRequired = !decisionsEqual(backend.snapshotDecision, next, backend.platform)
-  const defaultAgentPreset = backend.defaultAgentPreset()
   return {
     schemaVersion: 1,
     platform: backend.platform,
@@ -117,8 +111,6 @@ export function buildState(backend: ShellSelectorBackend): ShellSelectorState {
     restartRequired,
     activeMissing,
     configuredMissing,
-    gatedByPreset: gated,
-    ...(defaultAgentPreset === undefined ? {} : { defaultAgentPreset }),
     settingsRevision: backend.revision(),
     writable: backend.writable(),
   }

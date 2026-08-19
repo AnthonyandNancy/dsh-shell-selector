@@ -1,8 +1,8 @@
 # dsh-shell-selector
 
 Choose which shell interpreter DeepSeek Harness runs commands with —
-**Bash**, **PowerShell 7 (pwsh)** or **Windows PowerShell** — from a Settings
-page.
+**Bash** (including Git Bash on Windows), **PowerShell 7 (pwsh)** or
+**Windows PowerShell** — from a Settings page.
 
 | | |
 |---|---|
@@ -18,6 +18,19 @@ page.
 > tells you when a restart is required.
 
 ---
+
+## Product contract
+
+> **Agent Preset decides WHETHER there is Shell; Shell Selector decides WHICH
+> shell it is.**
+
+- Shell Selector never sets `agent-presets.default`, never contributes a
+  `shell-selector` agent preset, and never inspects preset names.
+- A preset that does not mount `tool-bash`/`tool-pwsh` cannot gain Shell
+  capability through this plugin.
+- A preset that does mount the standard Shell tools gets its **matching** tool
+  only: Bash active → `tool-bash`; PowerShell active → `tool-pwsh`. The
+  opposite tool is hidden per-agent with `tools.restrict()`.
 
 ## Why a restart?
 
@@ -56,37 +69,39 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design.
 | **Specific shell** | **Bash** (the only explicit option on POSIX in v1). |
 
 On Windows the WSL launcher (`System32\bash.exe`) is **not** treated as Bash.
+Git for Windows is discovered even when it is not on PATH.
 
 ---
 
 ## How the change takes effect
 
-The shell swap happens in the **composition layer at process startup** via
-three mechanisms installed by this plugin:
+The shell swap happens in the **composition layer at process startup** via:
 
 1. **Bundle patch** (`cordis.patch.yml`) — the executor rows
    `bash-sandbox` / `pwsh-sandbox` read the saved configuration at boot and
    enable exactly one of them. An explicit *Windows PowerShell* choice pins
    the Windows PowerShell executable path for the PowerShell executor.
-2. **Agent preset** (`shell-selector`) — sessions get the matching tool:
-   `tool-bash` when Bash was chosen, `tool-pwsh` when a PowerShell was chosen.
-   The preset is contributed through the official user-preset mechanism
-   (`$DSH_HOME/.agent-presets/shell-selector`) and becomes the default agent
-   preset.
+2. **Host plugin** (`src/index.ts`) — captures the boot snapshot, prepares the
+   Git Bash directory on `PATH` when needed, and registers the
+   `agent/created` listener that hides the non-matching Shell tool for every
+   shell-capable agent.
 3. **Settings namespace** (`shell-selector`, `mode: default|fallback|explicit`,
    `shell: bash|pwsh|powershell`) — persisted via the settings service.
 
 **No runtime replacement** of `ctx.shell`, **no** dynamic loading/unloading of
-`tool-bash`/`tool-pwsh`, **no** forced restart. The host plugin only registers
-settings, snapshots the boot decision, materializes the preset, and serves the
-Settings page.
+`tool-bash`/`tool-pwsh`, **no** forced restart, **no** default preset change.
 
-> **Note on agent presets:** installing this plugin makes **Shell Selector**
-> the default agent preset (visible in the Agent Presets settings). Choosing a
-> different preset disables the shell override for sessions that use it (the
-> Settings page shows a notice). Sessions keep standard behavior in every
-> other respect — this preset is a faithful copy of the standard preset whose
-> only difference is the two shell-tool rows.
+### Git Bash on Windows
+
+- Detection order: `bash.exe` on `PATH` → Git Bash derived from `git.exe` on
+  `PATH` → `%ProgramFiles%\Git` → `%ProgramFiles(x86)%\Git` →
+  `%LOCALAPPDATA%\Programs\Git`.
+- Every candidate is validated with real probes: `bash --version` and
+  `bash -c 'printf "$BASH_VERSION"'`; `System32\bash.exe` (WSL) is rejected.
+- Because the official Bash executor always spawns `bash` and cannot be told
+  to use an absolute path, the host plugin prepends the resolved Git Bash bin
+  directory to the **process-local** `PATH` when the active shell is Bash on
+  Windows. No registry or user environment is modified.
 
 ---
 
@@ -104,6 +119,10 @@ Settings → **Shell Interpreter**:
 - Warnings when the configured shell can no longer be detected, when the
   active shell is missing, or when no shell is available at all.
 
+The UI uses the DSH native primitives (`Menu`, `Button`, icons), not native
+`<select>` controls, so it matches the rest of the Settings experience in
+light/dark mode, keyboard navigation, and popover behavior.
+
 ## Development
 
 ```sh
@@ -112,21 +131,24 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 npm pack --dry-run
 ```
 
-- `scripts/render-patch.mjs` / `scripts/render-preset.mjs` generate
-  `cordis.patch.yml` and the preset composition from `src/boot/expressions.ts`
-  (single source of truth); `scripts/lint.mjs` verifies the committed files
-  are in sync.
+- `scripts/render-patch.mjs` generates `cordis.patch.yml` from
+  `src/boot/expressions.ts` (single source of truth); `scripts/lint.mjs`
+  verifies the committed file is in sync.
 - `scripts/build-client.mjs` bundles the browser client into
   `lib/client.js` (the DSH Web module-loader format).
 - `tests/expressions.test.ts` evaluates the boot expressions against a
   fabricated environment and asserts they agree with `src/resolver.ts`.
+- `tests/detector.test.ts` covers Git Bash discovery, WSL rejection, probe
+  validation, and duplicate de-duplication.
+- `tests/client/*` covers the DSH-native Select and Settings page layout.
 
 ## Security notes
 
 - Configuration accepts only the allowlisted ids — there is no free-form
   command or path input, and **no user input is ever evaluated or spawned**.
 - The boot expressions read `$DSH_HOME/settings.yaml` directly (a JSON parse
-  attempt, then a flat YAML section parse) and never execute shell commands.
+  attempt, then a flat YAML section parse) and only probe the fixed,
+  allowlisted candidate executables.
 - The Web endpoint is same-origin, GET/POST only, with strict CSP headers and
   body-size limits; the settings namespace itself is not exposed over the
   settings RPC.

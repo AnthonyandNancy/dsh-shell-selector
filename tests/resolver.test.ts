@@ -97,11 +97,20 @@ describe('mode=explicit', () => {
   })
 })
 
-describe('gating by agent preset', () => {
-  it('makes any override inert when another preset is the default', () => {
-    expect(resolveEffective({ mode: 'explicit', shell: 'bash' }, 'win32', ONLY_BASH, true)).toEqual({
-      kind: 'platform',
-      reason: 'gated-by-preset',
+describe('Shell Selector policy independence', () => {
+  it('keeps Bash independent of the caller-selected preset', () => {
+    expect(resolveEffective({ mode: 'explicit', shell: 'bash' }, 'win32', ONLY_BASH)).toEqual({
+      kind: 'bash',
+      reason: 'explicit',
+      shell: 'bash',
+    })
+  })
+
+  it('keeps PowerShell independent of the caller-selected preset', () => {
+    expect(resolveEffective({ mode: 'explicit', shell: 'pwsh' }, 'win32', ONLY_PWSH)).toEqual({
+      kind: 'pwsh',
+      reason: 'explicit',
+      shell: 'pwsh',
     })
   })
 })
@@ -172,7 +181,7 @@ describe('restartRequired', () => {
     ).toBe(true)
   })
 
-  it('is false for default → default even when gated', () => {
-    expect(restartRequired(resolveEffective({ mode: 'default' }, 'win32', ALL), { mode: 'default' }, 'win32', ALL, true)).toBe(false)
+  it('is false for default → default', () => {
+    expect(restartRequired(resolveEffective({ mode: 'default' }, 'win32', ALL), { mode: 'default' }, 'win32', ALL)).toBe(false)
   })
 })

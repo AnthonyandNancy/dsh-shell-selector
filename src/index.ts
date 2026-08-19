@@ -5,30 +5,28 @@
  * and take effect on the NEXT process start. This plugin never replaces
  * `ctx.shell`, never unloads/reloads `tool-bash`/`tool-pwsh`, never restarts
  * anything. The shell swap happens at boot, in the composition layer, via the
- * bundle patch expressions (`cordis.patch.yml`) and the `shell-selector`
- * agent preset.
+ * bundle patch expressions (`cordis.patch.yml`).
  *
  * This apply() function therefore only: registers the settings namespace,
- * captures the immutable boot snapshot, materializes the agent preset,
- * serves the Settings endpoint, and reports the restart requirement.
+ * captures the immutable boot snapshot, prepares the Bash PATH for Git for
+ * Windows, installs the per-agent Shell Tool adaptation, serves the Settings
+ * endpoint, and reports the restart requirement.
  *
  * @module dsh-shell-selector
  */
 
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, delimiter } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import {
-  AGENT_PRESETS_SETTINGS_NAMESPACE,
   SHELL_SELECTOR_SETTINGS_NAMESPACE,
   ShellSelectorSchema,
 } from './settings.js'
 import { bashAvailability, pwshAvailability, windowsPowerShellAvailability } from './detector.js'
-import { resolveEffective, type EffectiveDecision } from './resolver.js'
+import { resolveEffective, resolvedShellKind, type EffectiveDecision } from './resolver.js'
 import { createRuntimeSnapshot } from './runtime-snapshot.js'
-import { ensurePreset } from './preset.js'
 import { DetectionCache, installShellSelectorWeb, type ShellSelectorBackend } from './web.js'
+import { adaptAgentShell, type AgentLike } from './agent-shell.js'
 
 /** Stable Cordis plugin name (the bundle patch inserts a row with this package). */
 export const name = 'shell-selector'
@@ -42,52 +40,6 @@ function readPluginVersion(): string {
     return typeof manifest.version === 'string' ? manifest.version : '0.0.0'
   } catch {
     return '0.0.0'
-  }
-}
-
-/**
- * Read the agent-presets GATE exactly like the boot expressions do: from the
- * raw settings file, user layer only. The composition decides with this same
- * input, so the snapshot must too.
- */
-function readBootGate(): boolean {
-  try {
-    const home = resolveDshHome()
-    const text = readFileSync(join(home, 'settings.yaml'), 'utf8')
-    try {
-      const root = JSON.parse(text) as unknown
-      const gate = root !== null && typeof root === 'object' && !Array.isArray(root)
-        ? (root as Record<string, unknown>)['agent-presets']
-        : undefined
-      const section = gate !== null && typeof gate === 'object' && !Array.isArray(gate)
-        ? (gate as Record<string, unknown>)
-        : undefined
-      const value = section?.['default']
-      return typeof value === 'string' && value !== 'shell-selector'
-    } catch {
-      // fall through to the flat parse
-    }
-    let inSection = false
-    let gated = false
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.replace(/\s+$/u, '')
-      if (/^[A-Za-z0-9_-]+:\s*$/u.test(line)) {
-        inSection = line === 'agent-presets:'
-        continue
-      }
-      if (!inSection) continue
-      if (line.trim() === '') continue
-      if (!/^\s/u.test(raw)) {
-        inSection = false
-        continue
-      }
-      const m = /^\s*([A-Za-z0-9_-]+):\s*(.*?)\s*$/u.exec(line)
-      if (!m) continue
-      if (m[1] === 'default') gated = m[2]!.replace(/^["']|["']$/gu, '') !== 'shell-selector'
-    }
-    return gated
-  } catch {
-    return false
   }
 }
 
@@ -107,8 +59,28 @@ function snapshotExecutable(
 }
 
 /**
- * Plugin apply: register settings, capture the boot snapshot, materialize the
- * preset, install the Web endpoint, and start background detection.
+ * When the active shell is Bash on Windows and the resolved Bash is a Git for
+ * Windows installation that is not already on PATH, prepend its directory to
+ * the current process PATH. This is the only supported way to make the
+ * official `bash-local`/`bash-sandbox` executor (which spawns `bash`) reach a
+ * Git Bash that was never manually added to PATH. The change is process-local
+ * and never writes the registry or user environment.
+ */
+function prepareBashPath(platform: string, activeKind: ReturnType<typeof resolvedShellKind>): void {
+  if (platform !== 'win32' || activeKind !== 'bash') return
+  const bash = bashAvailability(platform)
+  if (!bash.available || bash.path === undefined) return
+  const dir = dirname(bash.path)
+  const current = process.env.PATH ?? ''
+  if (current.split(delimiter).some((part) => part.trim().toLowerCase() === dir.toLowerCase())) return
+  process.env.PATH = `${dir}${delimiter}${current}`
+  process.env.DSH_SHELL_SELECTOR_BASH_PATH = bash.path
+}
+
+/**
+ * Plugin apply: register settings, capture the boot snapshot, prepare Bash
+ * PATH, install the per-agent Shell Tool adaptation, install the Web endpoint,
+ * and start background detection.
  */
 export function apply(ctx: Context): () => void {
   const pluginVersion = readPluginVersion()
@@ -120,9 +92,9 @@ export function apply(ctx: Context): () => void {
 
   // Boot facts, captured once and never revisited.
   const bootConfig = settingsScope.get()
-  const bootGate = readBootGate()
   const detection = new DetectionCache(platform)
-  const bootDecision = resolveEffective(bootConfig, platform, detection.availability(), bootGate)
+  const bootDecision = resolveEffective(bootConfig, platform, detection.availability())
+  const bootActiveKind = resolvedShellKind(bootDecision, platform)
   const snapshot = createRuntimeSnapshot({
     platform,
     config: bootConfig,
@@ -136,33 +108,22 @@ export function apply(ctx: Context): () => void {
     ),
   })
 
-  // Preset must exist before any session mounts; apply() runs at startup.
-  try {
-    ensurePreset(pluginVersion, { info: (msg) => ctx.logger.info(msg), warn: (msg) => ctx.logger.warn(msg) })
-  } catch (error) {
-    ctx.logger.error('dsh-shell-selector: failed to materialize the agent preset; sessions may not start. %s', error instanceof Error ? error.message : String(error))
-  }
+  prepareBashPath(platform, bootActiveKind)
+
+  // Agent capability is decided by each preset's composition; this listener
+  // only hides the shell tool that does not match the active executor. It runs
+  // before the first prompt and never grants Shell to a preset without it.
+  ;(ctx as Context & { on(event: string, listener: (payload: { agent: AgentLike }) => void): unknown }).on('agent/created', (payload) => {
+    try {
+      adaptAgentShell(payload.agent, bootActiveKind)
+    } catch (error) {
+      ctx.logger.warn('dsh-shell-selector: failed to adapt agent shell tool: %s', String(error))
+    }
+  })
 
   const revisionOf = (): number => {
     const descriptor = ctx.settings.describe().find((row) => row.ns === SHELL_SELECTOR_SETTINGS_NAMESPACE)
     return descriptor?.revision ?? 0
-  }
-
-  const isGated = (): boolean => {
-    const resolved = ctx.settings.get(AGENT_PRESETS_SETTINGS_NAMESPACE)
-    const value = resolved !== null && typeof resolved === 'object' && !Array.isArray(resolved)
-      ? (resolved as Record<string, unknown>)['default']
-      : undefined
-    if (typeof value === 'string') return value !== 'shell-selector'
-    return readBootGate()
-  }
-
-  const defaultAgentPreset = (): string | undefined => {
-    const resolved = ctx.settings.get(AGENT_PRESETS_SETTINGS_NAMESPACE)
-    const value = resolved !== null && typeof resolved === 'object' && !Array.isArray(resolved)
-      ? (resolved as Record<string, unknown>)['default']
-      : undefined
-    return typeof value === 'string' ? value : undefined
   }
 
   const backend: ShellSelectorBackend = {
@@ -179,8 +140,6 @@ export function apply(ctx: Context): () => void {
     availability: () => detection.availability(),
     detected: () => detection.detected(),
     refreshDetection: () => detection.refresh(platform),
-    isGated,
-    defaultAgentPreset,
     revision: revisionOf,
     writable: () => (ctx.settings as unknown as { writable?: boolean }).writable ?? true,
   }

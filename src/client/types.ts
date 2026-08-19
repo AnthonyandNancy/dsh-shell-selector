@@ -8,11 +8,14 @@ export type ShellKind = 'bash' | 'pwsh' | 'powershell'
 export type ShellSelectorMode = 'default' | 'fallback' | 'explicit'
 export type ShellId = ShellKind
 
+export type ShellSource = 'path' | 'git-for-windows' | 'well-known' | 'system'
+
 export interface DetectedShell {
   kind: ShellKind
   name: string
   path?: string
   version?: string
+  source?: ShellSource
 }
 
 export interface ActiveShell {
@@ -33,8 +36,6 @@ export interface ShellSelectorState {
   restartRequired: boolean
   activeMissing: boolean
   configuredMissing: boolean
-  gatedByPreset: boolean
-  defaultAgentPreset?: string
   settingsRevision: number
   writable: boolean
 }

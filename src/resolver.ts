@@ -48,7 +48,6 @@ export interface EffectiveDecision {
     | 'fallback-unavailable'
     | 'explicit'
     | 'explicit-unavailable'
-    | 'gated-by-preset'
   /** The configured shell id when the decision came from an explicit choice. */
   shell?: ShellId
 }
@@ -63,17 +62,14 @@ const NO_SHELLS: ShellAvailability = { bash: false, pwsh: false, powershell: fal
  * @param config - the persisted configuration.
  * @param platform - `process.platform`.
  * @param availability - live detection results.
- * @param gated - true when the user explicitly selected another agent preset,
- *   making the shell override inert for sessions.
  */
 export function resolveEffective(
   config: ShellSelectorConfig,
   platform: string,
   availability: ShellAvailability,
-  gated = false,
 ): EffectiveDecision {
-  if (gated || config.mode === 'default') {
-    return { kind: 'platform', reason: gated ? 'gated-by-preset' : 'platform-default' }
+  if (config.mode === 'default') {
+    return { kind: 'platform', reason: 'platform-default' }
   }
   if (platform === 'win32') {
     if (config.mode === 'fallback') {
@@ -142,16 +138,14 @@ export function decisionsEqual(left: EffectiveDecision, right: EffectiveDecision
  * @param configured - the current (possibly just-saved) configuration.
  * @param platform - `process.platform`.
  * @param availability - detection results as of now.
- * @param gated - true when another agent preset is explicitly selected.
  */
 export function restartRequired(
   booted: EffectiveDecision,
   configured: ShellSelectorConfig,
   platform: string,
   availability: ShellAvailability,
-  gated = false,
 ): boolean {
-  const next = resolveEffective(configured, platform, availability, gated)
+  const next = resolveEffective(configured, platform, availability)
   return !decisionsEqual(booted, next, platform)
 }
 

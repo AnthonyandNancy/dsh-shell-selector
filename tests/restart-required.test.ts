@@ -83,28 +83,3 @@ describe('restartRequired — availability shifts', () => {
   })
 })
 
-describe('restartRequired — gating', () => {
-  it('gated by another preset: override decisions are inert, boot was already gated → no restart', () => {
-    expect(
-      restartRequired(
-        resolveEffective({ mode: 'explicit', shell: 'bash' }, 'win32', ALL, true),
-        { mode: 'explicit', shell: 'pwsh' },
-        'win32',
-        ALL,
-        true,
-      ),
-    ).toBe(false)
-  })
-
-  it('gated now but not at boot: next boot differs → restart required', () => {
-    expect(
-      restartRequired(
-        resolveEffective({ mode: 'explicit', shell: 'bash' }, 'win32', ALL, false),
-        { mode: 'explicit', shell: 'bash' },
-        'win32',
-        ALL,
-        true,
-      ),
-    ).toBe(true)
-  })
-})

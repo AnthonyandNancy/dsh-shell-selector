@@ -10,9 +10,9 @@
 # the Loader with `new Function("ctx","expr","with(ctx){return eval(expr)}")`
 # where only `process`/`Buffer`/`fetch`/`globalThis` are guaranteed.
 
-# Mount the host plugin (settings, snapshot, preset bootstrap, Settings
-# endpoint). Without this row the bundle's patch lines would apply but the
-# plugin itself would never load.
+# Mount the host plugin (settings, snapshot, per-agent Shell Tool adaptation,
+# Settings endpoint). Without this row the bundle's patch lines would apply but
+# the plugin itself would never load.
 - insert:
     - id: shell-selector
       name: 'dsh-shell-selector'
@@ -30,12 +30,3 @@
   config:
     pwshPath: !!js |
       {{PWSH_PATH_EXPR}}
-
-# Sessions compose from the `shell-selector` agent preset (a faithful copy of
-# the standard preset whose tool rows follow the same expressions). The
-# composeProfile overlay preserves every other agent-presets key; only the
-# default preset id changes. Users who explicitly chose another preset keep
-# their choice — the shell override is inert for their sessions.
-- id: agent-presets
-  config:
-    default: shell-selector

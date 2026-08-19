@@ -11,7 +11,6 @@ import { readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { renderPatch } from './render-patch.mjs'
-import { renderPreset } from './render-preset.mjs'
 
 const root = dirname(fileURLToPath(new URL('../package.json', import.meta.url)))
 let failed = false
@@ -31,14 +30,6 @@ check('generated cordis.patch.yml is in sync', () => {
   const committed = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
   if (fresh !== committed) {
     throw new Error('cordis.patch.yml differs from the template render; run `pnpm build`')
-  }
-})
-
-check('generated agent preset composition is in sync', () => {
-  const fresh = renderPreset()
-  const committed = readFileSync(join(root, 'config', 'agent-presets', 'shell-selector', 'agent.cordis.yml'), 'utf8')
-  if (fresh !== committed) {
-    throw new Error('agent.cordis.yml differs from the template render; run `pnpm build`')
   }
 })
 

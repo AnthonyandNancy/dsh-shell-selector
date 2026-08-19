@@ -3,17 +3,20 @@
  * DeepSeek Harness actually use them?
  *
  * The availability rules mirror the boot expressions: a shell is reported
- * only when the DSH executor would be able to spawn it.
+ * only when the DSH executor would be able to spawn it. Git for Windows Bash
+ * is discovered from PATH, from `git.exe` roots, and from well-known install
+ * locations, then validated with a real `bash --version` + `$BASH_VERSION`
+ * probe before it is considered available.
  *
  * @module dsh-shell-selector/detector
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { candidatePwshPaths } from '@deepseek-ai/dsh-pwsh-local'
-import type { ShellAvailability, ShellId } from './resolver.js'
-import type { DetectedShell } from './types.js'
+import type { ShellAvailability } from './resolver.js'
+import type { DetectedShell, ShellSource } from './types.js'
 
 /** Windows Subsystem for Linux launcher: not a Bash we can claim. */
 const WSL_BASH = join('System32', 'bash.exe')
@@ -23,6 +26,12 @@ const POSIX_BASH_FALLBACK_DIRS = ['/bin', '/usr/bin', '/usr/local/bin']
 
 /** Probe timeout per version read; a slow first start is a probe miss, not a hang. */
 const VERSION_PROBE_TIMEOUT_MS = 5000
+
+/** A discovered Bash candidate. */
+export interface BashCandidate {
+  path: string
+  source: ShellSource
+}
 
 function isExecutableFile(path: string): boolean {
   try {
@@ -52,27 +61,136 @@ function resolveInPath(exe: string, env: NodeJS.ProcessEnv, extraDirs: string[] 
   return undefined
 }
 
+/** Full environment for spawned probes: process env overlaid with the supplied fake env. */
+function probeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const merged: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) merged[key] = value
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) merged[key] = value
+  }
+  return merged
+}
+
+/** True when a Windows bash path is the WSL launcher under SystemRoot. */
+function isWslBash(path: string, env: NodeJS.ProcessEnv): boolean {
+  const sysRoot = String(env.SystemRoot ?? env.windir ?? 'C:\\Windows')
+  return resolve(path).toLowerCase() === resolve(join(sysRoot, WSL_BASH)).toLowerCase()
+}
+
+function addCandidate(list: BashCandidate[], seen: Set<string>, path: string, source: ShellSource): void {
+  const key = resolve(path).toLowerCase()
+  if (seen.has(key)) return
+  seen.add(key)
+  list.push({ path: resolve(path), source })
+}
+
+function addGitRootCandidates(list: BashCandidate[], seen: Set<string>, root: string, source: ShellSource): void {
+  addCandidate(list, seen, join(root, 'bin', 'bash.exe'), source)
+  addCandidate(list, seen, join(root, 'usr', 'bin', 'bash.exe'), source)
+}
+
 /**
- * Bash availability. On Windows the only claim we make is "resolvable from
- * PATH and not the WSL launcher": that is exactly the executable
- * `dsh-bash-local` would spawn. A Git Bash install that is not on PATH is
- * reported through `detect()` (as a hint) but not through `availability()`.
+ * Discover Bash candidates on Windows. Order matters: PATH entries first,
+ * then roots derived from `git.exe`, then well-known Git for Windows
+ * locations. The WSL launcher is rejected at every step.
  */
-export function bashAvailability(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env): { available: boolean; path?: string } {
+export function bashCandidates(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env): BashCandidate[] {
+  if (platform !== 'win32') return []
+  const seen = new Set<string>()
+  const result: BashCandidate[] = []
+  const add = (path: string, source: ShellSource): void => {
+    if (!isExecutableFile(path) || isWslBash(path, env)) return
+    addCandidate(result, seen, path, source)
+  }
+
+  for (const dir of pathDirectories(env)) {
+    add(join(dir, 'bash.exe'), 'path')
+  }
+
+  for (const dir of pathDirectories(env)) {
+    const git = join(dir, 'git.exe')
+    if (!isExecutableFile(git)) continue
+    const root = resolve(dir, '..')
+    addGitRootCandidates(result, seen, root, 'git-for-windows')
+  }
+
+  const programFiles = String(env.ProgramFiles ?? 'C:\\Program Files')
+  const programFilesX86 = String(env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)')
+  addGitRootCandidates(result, seen, join(programFiles, 'Git'), 'git-for-windows')
+  addGitRootCandidates(result, seen, join(programFilesX86, 'Git'), 'git-for-windows')
+
+  const localAppData = String(env.LOCALAPPDATA ?? '')
+  if (localAppData.length > 0) {
+    addGitRootCandidates(result, seen, join(localAppData, 'Programs', 'Git'), 'git-for-windows')
+  }
+
+  return result
+}
+
+/**
+ * Synchronously validate one Bash executable and return its version string.
+ * Both `--version` and a `$BASH_VERSION` probe must succeed; a miss returns
+ * `undefined`, never throws.
+ */
+export function probeBashSync(path: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const fullEnv = probeEnv(env)
+  let version: string | undefined
+  try {
+    const versionResult = spawnSync(path, ['--version'], {
+      encoding: 'utf8',
+      timeout: VERSION_PROBE_TIMEOUT_MS,
+      windowsHide: true,
+      env: fullEnv,
+    })
+    if (versionResult.error !== undefined || versionResult.status !== 0) return undefined
+    const text = String(versionResult.stdout ?? '').trim()
+    version = text.split(/\r?\n/, 1)[0]?.trim() || undefined
+  } catch {
+    return undefined
+  }
+  try {
+    const probe = spawnSync(path, ['-c', 'printf "%s" "$BASH_VERSION"'], {
+      encoding: 'utf8',
+      timeout: VERSION_PROBE_TIMEOUT_MS,
+      windowsHide: true,
+      env: fullEnv,
+    })
+    if (probe.error !== undefined || probe.status !== 0) return undefined
+    if (String(probe.stdout ?? '').trim().length === 0) return undefined
+  } catch {
+    return undefined
+  }
+  return version
+}
+
+/**
+ * Bash availability. On Windows every candidate is discovered through
+ * {@link bashCandidates} and validated with a real spawn probe; the WSL
+ * launcher is never reported. On POSIX the same probe is applied to PATH and
+ * the standard fallback directories.
+ */
+export function bashAvailability(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env): {
+  available: boolean
+  path?: string
+  version?: string
+  source?: ShellSource
+} {
   if (platform !== 'win32') {
     const onPath = resolveInPath('bash', env)
-    if (onPath !== undefined) return { available: true, path: onPath }
-    for (const dir of POSIX_BASH_FALLBACK_DIRS) {
-      const full = join(dir, 'bash')
-      if (isExecutableFile(full)) return { available: true, path: full }
-    }
-    return { available: false }
+    const found = onPath ?? POSIX_BASH_FALLBACK_DIRS.map((dir) => join(dir, 'bash')).find((full) => isExecutableFile(full))
+    if (found === undefined) return { available: false }
+    const version = probeBashSync(found, env)
+    return version === undefined ? { available: false, path: found } : { available: true, path: found, version, source: 'system' }
   }
-  const found = resolveInPath('bash.exe', env)
-  if (found === undefined) return { available: false }
-  const sysRoot = String(env.SystemRoot ?? env.windir ?? 'C:\\Windows')
-  if (found.toLowerCase() === join(sysRoot, WSL_BASH).toLowerCase()) return { available: false }
-  return { available: true, path: found }
+  for (const candidate of bashCandidates(platform, env)) {
+    const version = probeBashSync(candidate.path, env)
+    if (version !== undefined) {
+      return { available: true, path: candidate.path, version, source: candidate.source }
+    }
+  }
+  return { available: false }
 }
 
 /**
@@ -105,16 +223,12 @@ export function detectAvailability(platform: string = process.platform, env: Nod
 }
 
 /**
- * Version probe for one shell executable. Best-effort: a miss yields
+ * Version probe for one PowerShell executable. Best-effort: a miss yields
  * `undefined`, never a failure.
  */
-function probeVersion(kind: ShellId, executable: string): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const argv =
-      kind === 'bash'
-        ? [executable, '--version']
-        : [executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()']
-    const child = spawn(argv[0]!, argv.slice(1), {
+function probePowerShellVersion(executable: string): Promise<string | undefined> {
+  return new Promise((resolvePromise) => {
+    const child = spawn(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       timeout: VERSION_PROBE_TIMEOUT_MS,
@@ -124,7 +238,7 @@ function probeVersion(kind: ShellId, executable: string): Promise<string | undef
     child.stderr.on('data', () => {})
     const settle = (value: string | undefined): void => {
       child.kill()
-      resolve(value)
+      resolvePromise(value)
     }
     child.on('error', () => settle(undefined))
     child.on('close', (code) => {
@@ -136,12 +250,12 @@ function probeVersion(kind: ShellId, executable: string): Promise<string | undef
   })
 }
 
-/** Probe versions concurrently; a slow shell delays the result, never blocks it forever. */
-async function probeVersions(entries: { kind: ShellId; path: string }[]): Promise<Map<ShellId, string>> {
-  const found = new Map<ShellId, string>()
+/** Probe PowerShell versions concurrently; a slow shell delays the result, never blocks it forever. */
+async function probePowerShellVersions(entries: { kind: 'pwsh' | 'powershell'; path: string }[]): Promise<Map<'pwsh' | 'powershell', string>> {
+  const found = new Map<'pwsh' | 'powershell', string>()
   await Promise.all(
     entries.map(async (entry) => {
-      const version = await probeVersion(entry.kind, entry.path)
+      const version = await probePowerShellVersion(entry.path)
       if (version !== undefined) found.set(entry.kind, version)
     }),
   )
@@ -150,27 +264,27 @@ async function probeVersions(entries: { kind: ShellId; path: string }[]): Promis
 
 /**
  * Full detection: availability + executable paths + best-effort versions.
- * Versions are probed concurrently with a per-process timeout.
+ * Bash is validated synchronously with a real probe; PowerShell versions are
+ * probed concurrently with a per-process timeout.
  */
 export async function detect(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env): Promise<DetectedShell[]> {
   const bash = bashAvailability(platform, env)
   const pwsh = pwshAvailability(env)
   const powershell = windowsPowerShellAvailability(platform, env)
-  const versions = await probeVersions(
+  const versions = await probePowerShellVersions(
     [
-      ...(bash.available && bash.path !== undefined ? [{ kind: 'bash' as const, path: bash.path }] : []),
       ...(pwsh.available && pwsh.path !== undefined ? [{ kind: 'pwsh' as const, path: pwsh.path }] : []),
       ...(powershell.available && powershell.path !== undefined ? [{ kind: 'powershell' as const, path: powershell.path }] : []),
     ],
   )
   const result: DetectedShell[] = []
   if (bash.available) {
-    const version = versions.get('bash')
     result.push({
       kind: 'bash',
-      name: 'Bash',
+      name: bash.source === 'git-for-windows' || bash.source === 'well-known' ? 'Git Bash' : 'Bash',
       ...(bash.path === undefined ? {} : { path: bash.path }),
-      ...(version === undefined ? {} : { version }),
+      ...(bash.version === undefined ? {} : { version: bash.version }),
+      ...(bash.source === undefined ? {} : { source: bash.source }),
     })
   }
   if (pwsh.available) {
@@ -194,13 +308,21 @@ export async function detect(platform: string = process.platform, env: NodeJS.Pr
   return result
 }
 
-/** Synchronous availability probe for the boot-time state (no versions). */
+/** Synchronous availability probe for the boot-time state (with Bash validation). */
 export function detectSync(platform: string = process.platform, env: NodeJS.ProcessEnv = process.env): DetectedShell[] {
   const bash = bashAvailability(platform, env)
   const pwsh = pwshAvailability(env)
   const powershell = windowsPowerShellAvailability(platform, env)
   const result: DetectedShell[] = []
-  if (bash.available) result.push({ kind: 'bash', name: 'Bash', ...(bash.path === undefined ? {} : { path: bash.path }) })
+  if (bash.available) {
+    result.push({
+      kind: 'bash',
+      name: bash.source === 'git-for-windows' || bash.source === 'well-known' ? 'Git Bash' : 'Bash',
+      ...(bash.path === undefined ? {} : { path: bash.path }),
+      ...(bash.version === undefined ? {} : { version: bash.version }),
+      ...(bash.source === undefined ? {} : { source: bash.source }),
+    })
+  }
   if (pwsh.available) result.push({ kind: 'pwsh', name: 'PowerShell 7', ...(pwsh.path === undefined ? {} : { path: pwsh.path }) })
   if (powershell.available) {
     result.push({

@@ -5,10 +5,14 @@ interpreter, why a restart is required, and how the pieces fit together.
 
 ## Product contract
 
+- **Agent Preset decides WHETHER there is Shell; Shell Selector decides WHICH
+  shell it is.**
 - **No hot switching.** Configuration changes are *persisted* and take effect
   on the *next process start*.
 - **No runtime replacement** of `ctx.shell`, **no** dynamic unload/load of
   `tool-bash`/`tool-pwsh`, **no** forced restart, **no** "apply now".
+- **No preset coupling.** The plugin never sets `agent-presets.default`, never
+  ships a `shell-selector` agent preset, and never inspects preset names.
 - The plugin must not modify the DSH main repository or `node_modules` of the
   app; it ships as a normal npm bundle installed with `dsh plugin add`.
 - Supported on Windows, macOS and Linux, with a Web Settings page that looks
@@ -22,9 +26,9 @@ The shell stack is a *boot-time composition decision*:
   the process starts**, before any session exists. Exactly one of them
   provides `ctx.shell`; DSH ships the platform rule by disabling one of them
   per platform.
-- The agent-preset service composes each session's tool list from a *default
-  preset chosen at boot* (`agent-presets.config.default`), including the shell
-  tool rows (`tool-bash` / `tool-pwsh`).
+- Each session's tool list is composed by the agent-preset service from the
+  preset it mounts. Shell Selector only restricts the tool that does not match
+  the already-active executor.
 
 Replacing that stack in a running process would mean disposing and re-activing
 platform services (the sandbox executors keep per-process state such as
@@ -50,7 +54,7 @@ the restart requirement.
 - `mode` / `shell` — the configuration the process **booted with** (never
   `settings.shell` of the *current* value).
 - `reason` — how the boot decision came to be (`platform-default`, `fallback`,
-  `explicit`, `explicit-unavailable`, `gated-by-preset`).
+  `explicit`, `explicit-unavailable`).
 - `executable` — the resolved executable path of the active executor, when
   known.
 
@@ -63,7 +67,7 @@ exists is a live fact, checked on every state read (`activeMissing`).
 `configured` (mode/shell) is read live from the settings service and can
 change at any time while the process runs. The state builder computes:
 
-- `next = resolveEffective(configured, platform, availability, gated)` — the
+- `next = resolveEffective(configured, platform, availability)` — the
   decision the next boot will make, using the same resolution rules as the
   boot expressions.
 - `restartRequired = !decisionsEqual(snapshotDecision, next, platform)` —
@@ -75,8 +79,9 @@ change at any time while the process runs. The state builder computes:
   (`explicit-unavailable`); the UI shows「当前配置的 Shell 已无法检测到。」
 - `fallback-none` — fallback mode with no shell available anywhere
   (`fallback-unavailable`).
-- `gatedByPreset` — another agent preset is the user's default, so the
-  override is inert for sessions.
+
+There is no `gatedByPreset` state. The capability question belongs to the
+agent preset composition, not to Shell Selector.
 
 ## The boot composition (how the swap actually happens)
 
@@ -103,10 +108,9 @@ self-contained arrow IIFE evaluated by the loader's
 activation — i.e. during boot. They:
 
 - read `$DSH_HOME/settings.yaml` (JSON parse attempt, then a flat section
-  parse of `shell-selector` and `agent-presets`),
-- probe the machine (PATH for `bash.exe`/`pwsh.exe`, `%ProgramFiles%` for
-  PowerShell 7, `%SystemRoot%` for Windows PowerShell; the WSL launcher
-  `System32\bash.exe` is excluded),
+  parse of `shell-selector`),
+- probe the machine for real Bash/PowerShell availability (including Git for
+  Windows paths; WSL `System32\bash.exe` is excluded),
 - decide `eff.kind ∈ {platform, bash, pwsh, powershell}` with the same rules
   as `resolveEffective()` in `src/resolver.ts`,
 - return the row's `disabled` value — exactly one executor survives.
@@ -117,32 +121,22 @@ activation — i.e. during boot. They:
 charge. The bash row's `config.timeoutMs` is left untouched (patch rows
 replace only the keys they list).
 
-### 2. Agent preset — tool rows
+### 2. Agent-scoped Shell Tool adaptation
 
-Sessions get the matching shell tool from the `shell-selector` agent preset,
-materialized by `ensurePreset()` at `apply()` time into the official user
-root `$DSH_HOME/.agent-presets/shell-selector/` (preset discovery is
-first-root-wins, so the plugin can never shadow the shipped `standard` id).
-The preset is a byte-faithful copy of the shipped standard preset whose only
-difference is the two tool rows:
+The host plugin registers one `agent/created` listener. At that point the
+agent has already mounted its preset's standing scope, so `tools.view(agent)`
+reflects the preset's actual composition — without inspecting names. The
+listener:
 
-```yaml
-- id: tool-bash
-  disabled: !!js | (same expression as bash-sandbox)
-- id: tool-pwsh
-  disabled: !!js | (same expression as pwsh-sandbox)
-```
+- reads the **active boot shell kind** (immutable per process),
+- checks whether the agent has `bash` and/or `pwsh` visible,
+- does nothing if neither is visible (no capability grant),
+- otherwise calls `tools.restrict({ deny: [<the non-matching tool>] })` on the
+  agent's scope.
 
-The write is idempotent and marker-guarded: a copy carrying the plugin's
-version marker is refreshed; a marker-less file is treated as user-authored
-and left untouched (with a warning). Writes are tmp+rename atomic. The bundle
-patch also sets `agent-presets.config.default: shell-selector`, so default
-sessions use the preset (the agent-presets composition only overlays `roots`,
-leaving `default` in place).
-
-With `mode: default`, both expressions reduce to the shipped platform rule:
-behavior is identical to a stock install — **installing the plugin changes
-nothing about the current shell**.
+This guarantees the model-facing tool (`tool-bash` or `tool-pwsh`) matches the
+host executor (`ctx.shell`) for every shell-capable agent. Because the
+restriction is registered on the agent scope, it is disposed with the agent.
 
 ### 3. Settings namespace
 
@@ -154,19 +148,28 @@ is `explicit`. Writes go through the provider's CAS
 (`replace(ns, section, expectedRevision)`), surfacing
 `SettingsConflictError` as HTTP 409 for the Settings page.
 
-## Gating by agent preset
+## Git Bash on Windows
 
-The user may choose a different default agent preset in Agent Presets
-settings. Then sessions follow *that* preset's tool rows, and the shell
-override must be inert (otherwise the executor and the tool would
-disagree). Both the boot expressions and the host read the same gate — the
-`agent-presets.default` value from the raw settings file (user layer);
-the host prefers the resolved settings value and falls back to the file
-read. The UI shows a `warningGated` notice.
+The official Bash executor (`bash-sandbox`/`bash-local`) spawns `bash` and has
+no configurable executable path. To truly use Git Bash when it is not on
+`PATH`, the host plugin:
 
-Known edge: if *another plugin* patches `agent-presets.config.default` at a
-layer above this bundle's, the expressions (which only read the file) cannot
-see it; the host's `isGated()` can. Documented as a limitation.
+1. Detects Bash with `src/detector.ts`:
+   - `bash.exe` on `PATH`;
+   - Git Bash derived from `git.exe` on `PATH`;
+   - `%ProgramFiles%\Git`, `%ProgramFiles(x86)%\Git`,
+     `%LOCALAPPDATA%\Programs\Git`;
+   - every candidate is validated with `bash --version` and
+     `bash -c 'printf "$BASH_VERSION"'`; `System32\bash.exe` (WSL) is
+     rejected.
+2. When `platform === 'win32'` and the active shell is Bash, prepends the
+   resolved Git Bash bin directory to the **process-local** `PATH` in `apply()`.
+   This is the only supported way to make the official Bash executor reach a
+   Git Bash installation that was never added to PATH. It never writes the
+   registry or the user environment.
+
+The boot expressions use the same candidate discovery/probe logic so the
+composition and the host detector agree.
 
 ## The Web surface
 
@@ -197,21 +200,28 @@ ctx.slots.inject('settings.section', () => ctx.slots.register({
 
 The page uses `useSyncExternalStore` over a small controller (external store)
 that fetches the state endpoint, pushes saves with `expectedRevision`, and
-keeps the draft independent of the live snapshot. Sections: mode select
-(Windows: default/fallback/explicit; POSIX: default/explicit-bash), shell
-select for explicit mode, the fixed restart hint under the selector, the
-currently-active / after-restart status blocks, warnings, and
-Re-detect + Save actions. Client is bundled by `scripts/build-client.mjs`
-into the `window.__ModuleLoader__.load({id, factory(require)})` format with a
-private module table; package imports stay on the runtime `require`.
+keeps the draft independent of the live snapshot. The select controls are a
+thin wrapper (`DshSelect.tsx`) around the official `Menu`/`Button` primitives —
+no native `<select>`/`<option>` is used. Sections: mode select (Windows:
+default/fallback/explicit; POSIX: default/explicit-bash), shell select for
+explicit mode, the fixed restart hint and capability hint under the selector,
+the currently-active / after-restart status blocks, warnings, detected
+interpreters, and Re-detect + Save actions. Client is bundled by
+`scripts/build-client.mjs` into the `window.__ModuleLoader__.load({id,
+factory(require)})` format with a private module table; package imports stay on
+the runtime `require`.
 
 ## Detection
 
 `detector.ts` probes the same things the boot expressions do, parameterized
 by platform and environment so tests can fabricate machines:
 
-- Bash: PATH resolution (`bash.exe` on Windows, `bash` on POSIX with
-  `/bin /usr/bin /usr/local/bin` fallbacks); the WSL launcher is excluded.
+- Bash: `bash.exe` on PATH → Git Bash derived from `git.exe` on PATH →
+  `%ProgramFiles%\Git` → `%ProgramFiles(x86)%\Git` →
+  `%LOCALAPPDATA%\Programs\Git`; on POSIX `bash` in PATH plus
+  `/bin /usr/bin /usr/local/bin`. The WSL launcher is rejected.
+- Every Bash candidate is validated with real `spawnSync` probes
+  (`--version` and `$BASH_VERSION`).
 - PowerShell 7: DSH's own `candidatePwshPaths` (`%ProgramFiles%\PowerShell\7`
   → PATH) so the detector agrees with `resolvePwshPath`.
 - Windows PowerShell: `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`.
@@ -224,33 +234,36 @@ only re-scans — it never touches the runtime stack.**
 
 - `resolver.test.ts` / `fallback.test.ts` / `restart-required.test.ts` — the
   decision logic and the semantic restart computation.
-- `detector.test.ts` — fabricated PATH/ProgramFiles/SystemRoot trees on both
-  platform flavors (no real shells involved).
+- `agent-shell.test.ts` — per-agent tool restriction, including no-capability
+  no-op and no-preset-name coupling.
+- `detector.test.ts` — fabricated PATH/ProgramFiles/SystemRoot trees, Git Bash
+  discovery, WSL rejection, probe failure, and de-duplication.
 - `settings.test.ts` — schemastery v3 validation semantics.
 - `expressions.test.ts` — evaluates the **exact** rendered expressions with
   the loader's `new Function` machinery against a fabricated `$DSH_HOME` and
   asserts byte-for-byte agreement with the resolver mirror across the full
-  configuration × availability × gating matrix.
-- `scripts/lint.mjs` — verifies the committed `cordis.patch.yml` and preset
-  composition equal fresh renders, and that the host code never evals/spawns
-  user input or replaces `ctx.shell`.
+  configuration × availability matrix.
+- `client/DshSelect.test.tsx` / `client/ShellSelectorPage.test.tsx` — DSH
+  native Select behavior and Settings page layout in jsdom.
+- `scripts/lint.mjs` — verifies the committed `cordis.patch.yml` equals a
+  fresh render, and that the host code never evals/spawns user input or
+  replaces `ctx.shell`.
 
 ## File map
 
 ```
-src/index.ts            host apply(): settings, snapshot, preset, endpoint
+src/index.ts            host apply(): settings, snapshot, PATH prepend, agent listener, endpoint
 src/settings.ts         namespace, schema, validation, normalization
 src/resolver.ts         decision mirror (pure, platform-parameterized)
 src/boot/expressions.ts single source of the boot expressions
-src/boot/*.template     patch/preset templates (placeholders)
-src/detector.ts         availability + version probing
+src/boot/*.template     patch template (placeholders)
+src/detector.ts         availability + version probing (Git Bash aware)
 src/runtime-snapshot.ts immutable active-shell snapshot
-src/preset.ts           user-preset materialization (marker-guarded)
+src/agent-shell.ts      per-agent shell-tool restriction
 src/web.ts              state/action endpoints, detection cache
 src/types.ts            shared host types
-src/client/*            Web plugin: locale, controller, page, entry
-config/agent-presets/   shipped preset files (rendered)
+src/client/*            Web plugin: locale, controller, DshSelect, page, entry
 cordis.patch.yml        shipped bundle patch (rendered)
-scripts/*               clean-build, renderers, client bundler, lint
-tests/*                 unit + boot-expression contract suite
+scripts/*               clean-build, renderer, client bundler, lint
+tests/*                 unit + boot-expression + client contract suites
 ```

@@ -10,7 +10,7 @@
  * configuration × availability combination.
  */
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -28,12 +28,30 @@ const evaluate = new Function('ctx', 'expr', 'with (ctx) { return eval(expr) }')
   expr: string,
 ) => unknown
 
-/** A fake `process` for the expression: only what the expressions touch. */
+/**
+ * A fake `process` for the expression: only what the expressions touch.
+ * `node:child_process` is mocked so fabricated Bash fixtures pass the real
+ * `bash --version` / `$BASH_VERSION` probe contract.
+ */
 function fakeProcess(platform: string, env: Record<string, string>): Record<string, unknown> {
+  const real = (globalThis as unknown as { process: NodeJS.Process }).process
   return {
     platform,
     env,
-    getBuiltinModule: (id: string) => (globalThis as unknown as { process: NodeJS.Process }).process.getBuiltinModule(id),
+    getBuiltinModule: (id: string) => {
+      if (id === 'node:child_process') {
+        return {
+          spawnSync(file: string, args: string[]) {
+            if (existsSync(file)) {
+              const version = args[0] === '--version' ? 'GNU bash, version 5.2.0\n' : '5.2.0\n'
+              return { status: 0, stdout: version, stderr: '' }
+            }
+            return { status: 1, stdout: '', stderr: '' }
+          },
+        }
+      }
+      return real.getBuiltinModule(id)
+    },
   }
 }
 
@@ -96,12 +114,11 @@ function availabilityOf(
 }
 
 function configOf(body: string): BootConfig {
-  const cfg: BootConfig = { mode: 'default', gated: false }
+  const cfg: BootConfig = { mode: 'default' }
   if (/mode: explicit/u.test(body)) cfg.mode = 'explicit'
   else if (/mode: fallback/u.test(body)) cfg.mode = 'fallback'
   const shell = /shell: (\w+)/u.exec(body)
   if (shell !== null) cfg.shell = shell[1] as BootConfig['shell']
-  cfg.gated = /agent-presets:[\s\S]*default: (?!shell-selector)\w+/u.test(body)
   return cfg
 }
 
@@ -131,14 +148,10 @@ const CELLS: MatrixCell[] = [
   { name: 'explicit pwsh, missing', platform: 'win32', settings: 'shell-selector:\n  mode: explicit\n  shell: pwsh\n', envOptions: { platform: 'win32' } },
   { name: 'explicit powershell, available', platform: 'win32', settings: 'shell-selector:\n  mode: explicit\n  shell: powershell\n', envOptions: { platform: 'win32', powershell: true } },
   { name: 'explicit powershell, missing', platform: 'win32', settings: 'shell-selector:\n  mode: explicit\n  shell: powershell\n', envOptions: { platform: 'win32' } },
-  { name: 'gated by another preset, explicit bash', platform: 'win32', settings: 'shell-selector:\n  mode: explicit\n  shell: bash\nagent-presets:\n  default: standard\n', envOptions: { platform: 'win32', bash: true } },
-  { name: 'gated, default', platform: 'win32', settings: 'shell-selector:\n  mode: default\nagent-presets:\n  default: standard\n', envOptions: { platform: 'win32', bash: true, pwsh: true } },
-  { name: 'gated, fallback', platform: 'win32', settings: 'shell-selector:\n  mode: fallback\nagent-presets:\n  default: standard\n', envOptions: { platform: 'win32', bash: true } },
   { name: 'wsl launcher only on PATH', platform: 'win32', settings: 'shell-selector:\n  mode: explicit\n  shell: bash\n', envOptions: { platform: 'win32', bash: true, wslFirst: true } },
   { name: 'posix default', platform: 'linux', settings: 'shell-selector:\n  mode: default\n', envOptions: { platform: 'linux', bash: true } },
   { name: 'posix explicit bash', platform: 'linux', settings: 'shell-selector:\n  mode: explicit\n  shell: bash\n', envOptions: { platform: 'linux', bash: true } },
   { name: 'posix fallback (inert)', platform: 'linux', settings: 'shell-selector:\n  mode: fallback\n', envOptions: { platform: 'linux', bash: true } },
-  { name: 'posix gated', platform: 'linux', settings: 'shell-selector:\n  mode: explicit\n  shell: bash\nagent-presets:\n  default: standard\n', envOptions: { platform: 'linux', bash: true } },
 ]
 
 describe('boot expressions agree with the resolver mirror', () => {
@@ -159,12 +172,12 @@ describe('boot expressions agree with the resolver mirror', () => {
       const env = buildEnv(cell.envOptions)
       const platform = cell.platform
       const config = configOf(cell.settings)
-      const gated = config.gated
+      const availability = availabilityOf(platform, env, cell.envOptions)
 
       // What the composition must produce, per the mirror. A `platform`
       // decision leaves the shipped rule in charge: Bash on POSIX, the
       // PowerShell executor on Windows.
-      const decision = resolveEffective(config, platform, availabilityOf(platform, env, cell.envOptions), gated)
+      const decision = resolveEffective(config, platform, availability)
       const bashEnabled = decision.kind === 'bash' || (decision.kind === 'platform' && platform !== 'win32')
       const pwshEnabled = decision.kind === 'pwsh' || decision.kind === 'powershell' || (decision.kind === 'platform' && platform === 'win32')
       const powershellPath =
@@ -179,11 +192,8 @@ describe('boot expressions agree with the resolver mirror', () => {
   it('render templates carry the expression placeholders (byte-level)', async () => {
     const fs = await import('node:fs')
     const patchTemplate = fs.readFileSync(new URL('../src/boot/patch.yml.template', import.meta.url), 'utf8')
-    const presetTemplate = fs.readFileSync(new URL('../src/boot/preset-template.yml', import.meta.url), 'utf8')
     expect(patchTemplate).toContain('{{BASH_SANDBOX_DISABLED_EXPR}}')
     expect(patchTemplate).toContain('{{PWSH_SANDBOX_DISABLED_EXPR}}')
     expect(patchTemplate).toContain('{{PWSH_PATH_EXPR}}')
-    expect(presetTemplate).toContain('{{TOOL_BASH_DISABLED_EXPR}}')
-    expect(presetTemplate).toContain('{{TOOL_PWSH_DISABLED_EXPR}}')
   })
 })

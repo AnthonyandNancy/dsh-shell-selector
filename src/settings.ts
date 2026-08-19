@@ -17,16 +17,6 @@ import type { ShellId, ShellSelectorMode } from './resolver.js'
 export const SHELL_SELECTOR_SETTINGS_NAMESPACE = settingsNamespace('shell-selector')
 
 /**
- * The namespace of the agent-presets plugin. The user's explicit default
- * preset choice lives there; when it names a preset other than `shell-selector`,
- * the shell override is inert for sessions (tools follow the chosen preset).
- */
-export const AGENT_PRESETS_SETTINGS_NAMESPACE = settingsNamespace('agent-presets')
-
-/** The agent preset this plugin composes sessions from. */
-export const SHELL_SELECTOR_PRESET_ID = 'shell-selector'
-
-/**
  * Schemastery schema for the namespace. Note the v3 API: fields are optional
  * unless `.required()` is set, `undefined` values are dropped, and there is
  * no `.parse()` — validation goes through the Standard Schema

@@ -5,23 +5,16 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  AGENT_PRESETS_SETTINGS_NAMESPACE,
   isMode,
   isShellId,
   normalizeConfig,
-  SHELL_SELECTOR_PRESET_ID,
   SHELL_SELECTOR_SETTINGS_NAMESPACE,
   validateConfig,
 } from '../src/settings.js'
 
-describe('namespaces', () => {
+describe('namespace', () => {
   it('is a lowercase kebab namespace', () => {
     expect(String(SHELL_SELECTOR_SETTINGS_NAMESPACE)).toBe('shell-selector')
-    expect(String(AGENT_PRESETS_SETTINGS_NAMESPACE)).toBe('agent-presets')
-  })
-
-  it('names the preset id', () => {
-    expect(SHELL_SELECTOR_PRESET_ID).toBe('shell-selector')
   })
 })
 

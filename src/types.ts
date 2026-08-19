@@ -7,15 +7,20 @@
 
 import type { ShellId, ShellSelectorMode } from './resolver.js'
 
+/** Where a Bash executable was discovered. */
+export type ShellSource = 'path' | 'git-for-windows' | 'well-known' | 'system'
+
 /** One detected shell installation on the current machine. */
 export interface DetectedShell {
   kind: ShellId
-  /** Human-readable label, e.g. `PowerShell 7`. */
+  /** Human-readable label, e.g. `Git Bash` or `PowerShell 7`. */
   name: string
   /** Absolute path of the executable, when one was resolved. */
   path?: string
   /** Version string, best-effort (`--version` probe), when available. */
   version?: string
+  /** Discovery source for Bash entries, when known. */
+  source?: ShellSource
 }
 
 /** The immutable per-process snapshot of what the composition actually did. */
@@ -48,10 +53,6 @@ export interface ShellSelectorState {
   activeMissing: boolean
   /** True when the configured shell cannot be found on this machine. */
   configuredMissing: boolean
-  /** True when the configured shell is inert because another preset is default. */
-  gatedByPreset: boolean
-  /** The agent preset the next session would compose from, when known. */
-  defaultAgentPreset?: string
   /** Settings namespace revision, for save-with-conflict-detection. */
   settingsRevision: number
   writable: boolean

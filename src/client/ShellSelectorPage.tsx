@@ -3,11 +3,15 @@
  * commands with. Configuration is persisted immediately, but the running
  * process keeps its boot-time shell — the change applies after restart.
  *
+ * The page uses DSH-native primitives (`Menu`, `Button`) instead of browser
+ * `<select>` controls, so it matches the rest of DeepSeek Harness Settings.
+ *
  * @module dsh-shell-selector/client/page
  */
 
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DshSelect } from './DshSelect.js'
 import type { ShellSelectorController } from './controller.js'
 import type { EnLocaleKey } from './locale/en-US.js'
 import type { ShellId, ShellSelectorMode, ShellSelectorState } from './types.js'
@@ -39,6 +43,11 @@ function shellLabel(t: Translate, kind: ShellId): string {
   return t('shellPowershell')
 }
 
+function detectedName(snapshot: ShellSelectorState, kind: ShellId, t: Translate): string {
+  const entry = snapshot.detected.find((item) => item.kind === kind)
+  return entry?.name ?? shellLabel(t, kind)
+}
+
 /** The shell this process actually runs commands with. */
 function activeKindOf(snapshot: ShellSelectorState): ShellId {
   return snapshot.active.kind
@@ -60,15 +69,6 @@ function nextKindOf(configured: { mode: ShellSelectorMode; shell?: ShellId }, sn
     return activeKindOf(snapshot)
   }
   return snapshot.platform === 'win32' ? 'pwsh' : 'bash'
-}
-
-function ModeBlock({ label, kind, t }: { label: string; kind: ShellId; t: Translate }): JSX.Element {
-  return (
-    <div className="sss-status-row">
-      <span className="sss-status-label">{label}</span>
-      <span className="sss-status-value">{shellLabel(t, kind)}</span>
-    </div>
-  )
 }
 
 export function ShellSelectorPage({ controller, t }: ShellSelectorPageProps): JSX.Element {
@@ -97,148 +97,108 @@ export function ShellSelectorPage({ controller, t }: ShellSelectorPageProps): JS
       <div className="sss-section">
         <h2 className="sss-title">{t('title')}</h2>
         <p className="sss-intro">{t('intro')}</p>
-        {state.status === 'error' ? (
-          <div className="sss-alert-error" role="alert">
-            {t('error', { message: state.error ?? 'unknown' })}
-          </div>
-        ) : (
-          <div className="sss-loading" aria-busy="true">
-            …
-          </div>
-        )}
+        {state.status === 'error' ? <p className="sss-error">{t('error', { message: state.error ?? 'unknown' })}</p> : null}
+        <div className="sss-loading">{t('loading')}</div>
       </div>
     )
   }
 
   const busy = state.action !== undefined
-  const isWin = snapshot.platform === 'win32'
-  const explicitAvailable = isWin
-    ? snapshot.detected.length > 0
-    : snapshot.detected.some((entry) => entry.kind === 'bash')
-  const draftDiffers =
-    draft !== undefined &&
-    (draft.mode !== snapshot.configured.mode ||
-      (draft.mode === 'explicit' && draft.shell !== snapshot.configured.shell))
-  const showAfterRestart = snapshot.restartRequired || draftDiffers
-  const previewKind =
-    draftDiffers && draft !== undefined ? nextKindOf(draft, snapshot) : nextKindOf(snapshot.configured, snapshot)
-
-  const commit = (mode: ShellSelectorMode, shell: ShellId): void => {
-    setDraft({ mode, shell })
-    controller.dismissNotice()
-  }
+  const draftValue = draft ?? draftOf(snapshot)
+  const detected = snapshot.detected
+  const modeOptions = [
+    { value: 'default' as const, label: t('modeDefault'), description: t('modeDefaultHint') },
+    ...(snapshot.platform === 'win32'
+      ? [{ value: 'fallback' as const, label: t('modeFallback'), description: t('modeFallbackHint') }]
+      : []),
+    { value: 'explicit' as const, label: t('modeExplicit'), description: t('modeExplicitHint') },
+  ]
+  const shellOptions = detected.map((entry) => ({
+    value: entry.kind,
+    label: entry.name,
+    description: entry.path ?? entry.version,
+  }))
 
   const save = (): void => {
-    if (draft === undefined || busy) return
+    if (draft === undefined) return
     void controller.save(draft.mode, draft.mode === 'explicit' ? draft.shell : undefined, snapshot.settingsRevision)
   }
+
+  const nextKind = nextKindOf({ mode: draftValue.mode, ...(draftValue.mode === 'explicit' ? { shell: draftValue.shell } : {}) }, snapshot)
 
   return (
     <div className="sss-section">
       <h2 className="sss-title">{t('title')}</h2>
       <p className="sss-intro">{t('intro')}</p>
 
-      {snapshot.gatedByPreset && snapshot.defaultAgentPreset !== undefined ? (
-        <p className="sss-warning" role="status">
-          {t('warningGated', { preset: snapshot.defaultAgentPreset })}
-        </p>
-      ) : null}
-      {snapshot.activeMissing ? (
-        <p className="sss-warning" role="status">
-          {t('warningActiveMissing')}
-        </p>
-      ) : null}
-      {snapshot.configuredMissing ? (
-        <p className="sss-warning" role="status">
-          {t('warningMissing')}
-        </p>
-      ) : null}
-      {isWin && snapshot.configured.mode === 'fallback' && snapshot.detected.length === 0 ? (
-        <p className="sss-warning" role="status">
-          {t('warningFallbackNone')}
-        </p>
-      ) : null}
-
-      <div className="sss-status">
-        <ModeBlock label={t('activeBlock')} kind={activeKindOf(snapshot)} t={t} />
-        {showAfterRestart ? (
-          <ModeBlock label={t('afterRestartBlock')} kind={previewKind} t={t} />
-        ) : null}
-      </div>
-
-      <div className="sss-form">
-        <div className="sss-field">
-          <label className="sss-field-label" htmlFor="sss-mode">
-            {t('mode')}
-          </label>
-          <select
-            id="sss-mode"
-            className="sss-select"
-            value={draft?.mode ?? 'default'}
+      <div className="sss-rows">
+        <div className="sss-row">
+          <div className="sss-row-text">
+            <span className="sss-row-label">{t('mode')}</span>
+            <span className="sss-row-desc">{t('modeDescription')}</span>
+          </div>
+          <DshSelect
+            ariaLabel={t('mode')}
+            value={draftValue.mode}
+            options={modeOptions}
             disabled={busy || !snapshot.writable}
-            onChange={(event) => {
-              const mode = event.target.value as ShellSelectorMode
-              commit(mode, draft?.shell ?? 'bash')
-            }}
-          >
-            <option value="default">{t('modeDefault')}</option>
-            {isWin ? <option value="fallback">{t('modeFallback')}</option> : null}
-            <option value="explicit" disabled={!explicitAvailable}>
-              {t('modeExplicit')}
-            </option>
-          </select>
-          <p className="sss-hint">
-            {draft?.mode === 'default'
-              ? t('modeDefaultHint')
-              : draft?.mode === 'fallback'
-                ? t('modeFallbackHint')
-                : t('modeExplicit')}
-          </p>
-          <p className="sss-restart-hint">{t('restartHint')}</p>
+            onChange={(mode) => setDraft({ ...draftValue, mode })}
+          />
         </div>
 
-        {draft?.mode === 'explicit' ? (
-          <div className="sss-field">
-            <label className="sss-field-label" htmlFor="sss-shell">
-              {t('shell')}
-            </label>
-            <select
-              id="sss-shell"
-              className="sss-select"
-              value={draft.shell}
-              disabled={busy || !snapshot.writable}
-              onChange={(event) => {
-                commit('explicit', event.target.value as ShellId)
-              }}
-            >
-              {isWin ? (
-                <>
-                  <option value="bash">{t('shellBash')}</option>
-                  <option value="pwsh">{t('shellPwsh')}</option>
-                  <option value="powershell">{t('shellPowershell')}</option>
-                </>
-              ) : (
-                <option value="bash">{t('shellBash')}</option>
-              )}
-            </select>
+        {draftValue.mode === 'explicit' ? (
+          <div className="sss-row">
+            <div className="sss-row-text">
+              <span className="sss-row-label">{t('shell')}</span>
+              <span className="sss-row-desc">{t('shellDescription')}</span>
+            </div>
+            <DshSelect
+              ariaLabel={t('shell')}
+              value={draftValue.shell}
+              options={shellOptions}
+              disabled={busy || !snapshot.writable || shellOptions.length === 0}
+              onChange={(shell) => setDraft({ ...draftValue, shell })}
+            />
           </div>
         ) : null}
       </div>
 
-      {state.notice === 'saved' ? (
-        <p className="sss-saved" role="status" aria-live="polite">
-          {t('saved')}
-        </p>
-      ) : null}
-      {state.error !== undefined ? (
-        <p className="sss-error" role="alert">
-          {t('error', { message: state.error })}
-        </p>
-      ) : null}
+      <p className="sss-restart-hint">{t('restartHint')}</p>
+      <p className="sss-capability-hint">{t('capabilityHint')}</p>
+
+      <div className="sss-status">
+        <div className="sss-status-row">
+          <span className="sss-status-label">{t('activeBlock')}</span>
+          <span className="sss-status-value">{detectedName(snapshot, activeKindOf(snapshot), t)}</span>
+        </div>
+        <div className="sss-status-row">
+          <span className="sss-status-label">{t('afterRestartBlock')}</span>
+          <span className="sss-status-value">{detectedName(snapshot, nextKind, t)}</span>
+        </div>
+      </div>
+
+      {snapshot.activeMissing ? <p className="sss-warning">{t('warningActiveMissing')}</p> : null}
+      {snapshot.configuredMissing ? <p className="sss-warning">{t('warningMissing')}</p> : null}
+      {snapshot.detected.length === 0 ? <p className="sss-warning">{t('warningFallbackNone')}</p> : null}
+
+      <div className="sss-detected">
+        <span className="sss-detected-label">{t('detectedTitle')}</span>
+        {detected.length === 0 ? (
+          <span className="sss-detected-none">{t('detectedNone')}</span>
+        ) : (
+          detected.map((entry) => (
+            <div className="sss-detected-row" key={entry.kind}>
+              <span className="sss-detected-name">{entry.name}</span>
+              {entry.path === undefined ? null : <span className="sss-detected-path">{entry.path}</span>}
+              {entry.version === undefined ? null : <span className="sss-detected-version">{entry.version}</span>}
+            </div>
+          ))
+        )}
+      </div>
 
       <div className="sss-actions">
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => { void controller.detect() }}>
-          {state.action === 'detect' ? '…' : t('detect')}
+        <Button variant="outline" size="sm" disabled={busy} onClick={() => void controller.detect()}>
+          {state.action === 'detect' ? t('detecting') : t('detect')}
         </Button>
         <Button
           variant="primary"
@@ -251,20 +211,8 @@ export function ShellSelectorPage({ controller, t }: ShellSelectorPageProps): JS
         {!snapshot.writable ? <span className="sss-readonly">{t('readOnly')}</span> : null}
       </div>
 
-      <div className="sss-detected">
-        <span className="sss-detected-label">{t('detectedTitle')}:</span>{' '}
-        {snapshot.detected.length === 0 ? (
-          t('detectedNone')
-        ) : (
-          snapshot.detected.map((entry, index) => (
-            <span key={entry.kind}>
-              {index > 0 ? ' · ' : ''}
-              {entry.name}
-              {entry.version === undefined ? ` (${t('versionUnknown')})` : ` (${entry.version})`}
-            </span>
-          ))
-        )}
-      </div>
+      {state.error === undefined ? null : <p className="sss-error">{t('error', { message: state.error })}</p>}
+      {state.notice === 'saved' ? <p className="sss-saved">{t('saved')}</p> : null}
     </div>
   )
 }

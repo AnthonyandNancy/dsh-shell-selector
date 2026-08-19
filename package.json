@@ -34,14 +34,13 @@
   "files": [
     "lib",
     "src",
-    "config",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/render-patch.mjs && node scripts/render-preset.mjs && node scripts/build-client.mjs",
+    "build": "node scripts/clean-build.mjs && tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/render-patch.mjs && node scripts/build-client.mjs",
     "prepack": "npm run build",
     "test": "vitest run tests --pool=threads",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
@@ -91,9 +90,12 @@
     "@deepseek-ai/dsh-pwsh-local": "0.1.0-rc.6",
     "@deepseek-ai/dsh-settings": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.5",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
+    "jsdom": "^30.0.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "typescript": "^6.0.3",
