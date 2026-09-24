@@ -1,29 +1,20 @@
 /**
  * dsh-shell-selector — browser plugin entry.
  *
- * Registers the "Shell Interpreter" settings section (a first-level tab under
- * Settings, via the official `settings.section` slot) plus its locale and
- * styles. All configuration traffic goes through the plugin's own HTTP
- * endpoint (`/ _dsh/shell-selector/...`) because the settings namespace is
- * not on the Web exposure whitelist.
+ * Registers the "Shell Interpreter" settings section — a first-level tab under
+ * Settings, through the official `settings.section` slot (still rendered by
+ * DSH 0.1.7-rc.1) — plus its locale and styles. All configuration traffic goes
+ * through the plugin's own HTTP endpoint (`/_dsh/shell-selector/...`); the host
+ * side writes the `shell-selector` profile row through the settings service.
  *
  * @module dsh-shell-selector/client
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import type { ShellSelectorClientContext } from './context.js'
 import { ShellSelectorController } from './controller.js'
 import { ShellSelectorPage } from './ShellSelectorPage.js'
-import { en, type EnLocaleKey } from './locale/en-US.js'
+import { en } from './locale/en-US.js'
 import { zh } from './locale/zh-CN.js'
-
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface LocaleNamespaceMap {
-    'shell-selector': EnLocaleKey
-  }
-}
 
 const NS = 'shell-selector'
 
@@ -85,7 +76,7 @@ function installStyles(): () => void {
 export const inject = ['slots', 'locale']
 
 /** Register the settings section. */
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: ShellSelectorClientContext): void {
   ctx.effect(installStyles, 'dsh-shell-selector: styles')
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'dsh-shell-selector: locale')
   const t = ctx.locale.bind(NS)

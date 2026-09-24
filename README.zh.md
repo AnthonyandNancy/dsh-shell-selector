@@ -8,7 +8,7 @@
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web（设置 → **Shell 解析器** 标签页） |
-| 安装 | `dsh plugin add dsh-shell-selector-0.1.0.tgz` |
+| 安装 | `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
 | License | MIT |
 
 > **重启要求** — 更改 Shell 解析器 **不会** 热替换当前进程。选择会立即保存，
@@ -57,9 +57,10 @@ DeepSeek Harness 在**启动时**决定哪个 Shell 执行器（`ctx.shell`）�
 进程。运行时替换意味着在会话中途卸载/重载平台服务与工具——本插件刻意不
 这样做。实际流程：
 
-1. **保存** 将选择写入 `$DSH_HOME/settings.yaml`（标准设置服务，带冲突
-   检测写入）。
-2. **当前进程继续使用原有的 Shell**——不替换、不重启。
+1. **保存** 将选择写入本插件的 profile 行（`cordis.patch.yml` 的
+   `- id: shell-selector`），经由设置服务提交，因此仍带冲突检测。
+2. **当前进程继续使用原有的 Shell**——不替换、不重启（DSH 会 reconcile
+   该行并重载插件；启动事实保持不变）。
 3. 在**下次启动**时，组合层在激活执行器行时读取已保存的选择，从第一秒起
    就组合出匹配的 Shell。
 
@@ -153,7 +154,7 @@ npm pack --dry-run
 
 - 配置只接受白名单 id——没有自由格式命令或路径输入，**任何用户输入都不会
   被 eval 或 spawn**。
-- 启动表达式直接读取 `$DSH_HOME/settings.yaml`（先尝试 JSON 解析，再解析
-  扁平 YAML 段），只探测固定的白名单候选可执行文件。
-- Web 端点同源、仅 GET/POST，带严格 CSP 头与请求体大小限制；设置命名空间
-  本身不通过设置 RPC 暴露。
+- 启动表达式直接读取 profile 行（其次回退到已退役的
+  `$DSH_HOME/settings.yaml`），只探测固定的白名单候选可执行文件。
+- Web 端点同源、仅 GET/POST，带严格 CSP 头与请求体大小限制；设置页通过
+  该端点读写，而不是走设置 RPC。

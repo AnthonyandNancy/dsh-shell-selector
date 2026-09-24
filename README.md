@@ -8,7 +8,7 @@ Choose which shell interpreter DeepSeek Harness runs commands with —
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web (Settings → **Shell Interpreter** tab) |
-| Install | `dsh plugin add dsh-shell-selector-0.1.0.tgz` |
+| Install | `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
 | License | MIT |
 
 > **Restart requirement** — Changing the Shell interpreter does **not** hot-swap
@@ -66,10 +66,12 @@ composes into the running process. Swapping that stack at runtime would mean
 unloading and reloading platform services and tools mid-session — something
 this plugin deliberately never does. Instead:
 
-1. **Save** persists your choice to `$DSH_HOME/settings.yaml` (standard
-   settings service, conflict-checked writes).
+1. **Save** writes your choice to this plugin's profile row
+   (`cordis.patch.yml` -> `- id: shell-selector`) through the settings service,
+   so writes stay conflict-checked.
 2. The **current process keeps running with its original shell** — nothing is
-   replaced, nothing is restarted.
+   replaced, nothing is restarted. DSH reconciles the row, which reloads the
+   plugin; the boot facts stay frozen.
 3. On the **next boot**, the composition layer reads your saved choice while
    the executor rows are activated, and the matching shell is composed from
    the first second.
@@ -111,8 +113,9 @@ The shell swap happens in the **composition layer at process startup** via:
 2. **Host plugin** (`src/index.ts`) — captures the boot snapshot, prepares the
    Git Bash directory on `PATH` when needed, and installs the per-agent Shell
    Tool adaptation described above.
-3. **Settings namespace** (`shell-selector`, `mode: default|fallback|explicit`,
-   `shell: bash|pwsh|powershell`) — persisted via the settings service.
+3. **Configuration row** (`shell-selector`, `mode: default|fallback|explicit`,
+   `shell: bash|pwsh|powershell`) — a plugin Config projected into the settings
+   surface and persisted on the profile row.
 
 **No runtime replacement** of `ctx.shell`, **no** hot-swapping of the host
 executor, **no** forced restart, **no** default preset change. The bundle patch
@@ -180,16 +183,17 @@ npm pack --dry-run
 - `tests/client/*` covers the DSH-native Select (including menu placement and
   scoped keyboard navigation) and the Settings page layout.
 
-`src/compat/rc6-agent.ts` is the only module that speaks to DSH internals; the
-rc.6 structural assumptions live there with the observation that justifies each.
+`src/compat/rc6-agent.ts` and `src/compat/settings-surface.ts` are the only
+modules that speak to DSH internals; every assumption lives there with the
+observation that justifies it.
 
 ## Security notes
 
 - Configuration accepts only the allowlisted ids — there is no free-form
   command or path input, and **no user input is ever evaluated or spawned**.
-- The boot expressions read `$DSH_HOME/settings.yaml` directly (a JSON parse
-  attempt, then a flat YAML section parse) and only probe the fixed,
-  allowlisted candidate executables.
+- The boot expressions read the profile row directly (then the retired
+  `$DSH_HOME/settings.yaml`) and only probe the fixed, allowlisted candidate
+  executables.
 - The Web endpoint is same-origin, GET/POST only, with strict CSP headers and
-  body-size limits; the settings namespace itself is not exposed over the
-  settings RPC.
+  body-size limits; the settings page reads and writes through it rather than
+  through the settings RPC.

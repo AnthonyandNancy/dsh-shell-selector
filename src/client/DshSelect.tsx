@@ -12,7 +12,7 @@
  *
  *  - `portal` renders the list into `document.body` as a fixed-position layer,
  *    so an ancestor's `overflow` cannot crop it and it is clamped to the
- *    viewport (rc.6 keeps a 12px margin on every edge);
+ *    viewport, with a small margin on every edge;
  *  - `align="end"` pins the list's RIGHT edge to the trigger's right edge, so a
  *    list wider than its trigger grows leftwards, into the dialog, instead of
  *    escaping past its right edge.
@@ -29,7 +29,38 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react'
-import { Button, IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+
+/**
+ * The dropdown chevron.
+ *
+ * Drawn locally on purpose: the icon family was renamed between DSH rc.6
+ * (`IconChevronDownOutline14`) and rc.1 (`IconChevronDownOutlineRegular`), and a
+ * settings page must not depend on which naming the running client ships. The
+ * stroke uses `currentColor`, so the token-based `.sss-select-chevron` colour
+ * still applies.
+ */
+function ChevronDown({ className }: { className?: string }): JSX.Element {
+  return (
+    <svg
+      className={className}
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d="M3.5 5.5 7 9l3.5-3.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
 
 export interface DshSelectOption<T extends string> {
   value: T
@@ -159,7 +190,7 @@ export function DshSelect<T extends string>({
       onClick={() => setOpen((current) => !current)}
     >
       <span className="sss-select-trigger-label">{selected?.label ?? value}</span>
-      <IconChevronDownOutline14 className="sss-select-chevron" />
+      <ChevronDown className="sss-select-chevron" />
     </Button>
   )
 

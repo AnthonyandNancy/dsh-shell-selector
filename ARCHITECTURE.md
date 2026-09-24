@@ -105,8 +105,10 @@ exists is a live fact, checked on every state read (`activeMissing`).
 
 ## Pending configuration
 
-`configured` (mode/shell) is read live from the settings service and can
-change at any time while the process runs. The state builder computes:
+`configured` (mode/shell) is the row the Loader last resolved for the running
+fiber, read through `readField()` so volatile references become values; a save
+re-enters `apply()`, so it changes as soon as the settings service has
+reconciled the row. The state builder computes:
 
 - `next = resolveEffective(configured, platform, availability)` — the
   decision the next boot will make, using the same resolution rules as the
@@ -148,8 +150,11 @@ self-contained arrow IIFE evaluated by the loader's
 `new Function("ctx","expr","with(ctx){return eval(expr)}")` at entry
 activation — i.e. during boot. They:
 
-- read `$DSH_HOME/settings.yaml` (JSON parse attempt, then a flat section
-  parse of `shell-selector`),
+- read the `shell-selector` configuration: first the profile patch row
+  (`ctx.baseUrl` resolves the profile directory that holds `cordis.patch.yml`,
+  the document DSH 0.1.7-rc.1 persists user settings in), then the retired
+  `$DSH_HOME/settings.yaml` (JSON parse attempt, then a flat section parse) as
+  a fallback,
 - probe the machine for real Bash/PowerShell availability (including Git for
   Windows paths; WSL `System32\bash.exe` is excluded),
 - decide `eff.kind ∈ {platform, bash, pwsh, powershell}` with the same rules
@@ -165,8 +170,9 @@ replace only the keys they list).
 ### 2. Agent-scoped Shell Tool adaptation
 
 Owned by `src/agent-shell.ts` (the algorithm) and `src/agent/install.ts` (the
-lifecycle wiring). All rc.6 structural knowledge is isolated in
-`src/compat/rc6-agent.ts`.
+lifecycle wiring). All DSH-internal structural knowledge is isolated in
+`src/compat/rc6-agent.ts`; every assumption there was verified against
+0.1.0-rc.6 and re-verified unchanged against 0.1.7-rc.1.
 
 #### The algorithm
 
@@ -259,15 +265,38 @@ In Code Mode the wire surface carries `run_code` and the shells live in the SDK
 catalog, so the barrier does not append a shell to the wire schema; the SDK-facing
 catalog still follows the selector because it derives from the same tool view.
 
-### 3. Settings namespace
+### 3. Configuration row
 
-`ctx.settings.register(settingsNamespace('shell-selector'), schema, {base:
-{mode:'default'}, applies: 'restart'})`. The schemastery v3 schema accepts
-`mode` (`default|fallback|explicit`) and `shell` (`bash|pwsh|powershell`),
-drops `undefined` values, and `normalizeConfig()` strips `shell` unless mode
-is `explicit`. Writes go through the provider's CAS
-(`replace(ns, section, expectedRevision)`), surfacing
-`SettingsConflictError` as HTTP 409 for the Settings page.
+DSH 0.1.7-rc.1 does not let a plugin register a settings namespace; it
+projects each plugin entry's Config into the settings surface instead. Shell
+Selector therefore declares `Config` in `src/settings.ts`, and its
+configuration lives on the `shell-selector` profile row — the same row the
+boot expressions read. Both fields are marked `.volatile()`: that is what
+puts the row on the Settings page, and the only path a write may address.
+
+The schema accepts `mode` (`default|fallback|explicit`) and `shell`
+(`bash|pwsh|powershell`), drops `undefined` values, and `normalizeConfig()`
+strips `shell` unless mode is `explicit`. Writes go through the settings
+service's CAS (`ctx.settings.replace('shell-selector', section,
+expectedRevision)`), surfacing `SettingsConflictError` as HTTP 409 for the
+Settings page. The service reconciles the row afterwards, which re-enters
+`apply()`.
+
+A volatile field resolves to a **reference**, never to its value: the Loader
+hands `apply()` the cosmokit handle, `~standard.validate()` returns the same
+handle, and the settings service unwraps it again when it projects the live
+config into a form. Reading a handle as a value silently loses the
+configuration (`mode` degrades to `default`, `shell` is dropped), and handing
+one to a write is refused as `Config $.mode.get contains a function`. Both
+readers in `src/settings.ts` therefore go through `readField()`, which returns
+the field's value for a handle (recognized by cosmokit's global
+`cosmokit.volatile.write` slot, so it survives the host/plugin module split) and
+passes a plain value through unchanged.
+
+`apply(ctx, config)` reads the Loader-resolved row through that projection, and
+the boot facts it derives (decision, active shell, UI snapshot) are frozen on
+the first apply of the process: a save re-enters the function but must not
+redefine what this process booted with.
 
 ## Git Bash on Windows
 
@@ -294,8 +323,9 @@ composition and the host detector agree.
 
 ## The Web surface
 
-The `shell-selector` namespace is deliberately **not** on the Web settings
-RPC whitelist, so the browser talks to two same-origin exact routes
+The Settings page needs more than a form — the immutable boot snapshot, the
+live detection sweep and the restart verdict — so the browser talks to two
+same-origin exact routes
 (`/_dsh/shell-selector/state`, `/_dsh/shell-selector/action`) registered with
 `ctx.webServer.register({kind:'exact', …})` inside
 `ctx.inject(['webServer'], …)` (the fiber and its effects live in the
@@ -306,8 +336,8 @@ restrictive CSP; request bodies are capped.
 The client is a normal DSH Web plugin: `dsh.client.inject` lists the runtime
 dependencies, `apply(ctx)` installs styles (document-injected stylesheet with
 `data-plugin-css`, DSH design tokens only — no third-party UI library),
-registers the `shell-selector` locale namespace (module augmentation of
-`LocaleNamespaceMap`), and registers the settings section:
+registers the `shell-selector` locale dictionary, and registers the settings
+section — still the `settings.section` slot DSH 0.1.7-rc.1 renders:
 
 ```ts
 ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -383,8 +413,8 @@ only re-scans — it never touches the runtime stack.**
 ## File map
 
 ```
-src/index.ts            host apply(): settings, snapshot, PATH prepend, agent adaptation, endpoint
-src/settings.ts         namespace, schema, validation, normalization
+src/index.ts            host apply(): config, boot facts, PATH prepend, agent adaptation, endpoint
+src/settings.ts         Config schema, entry id, validation, normalization
 src/resolver.ts         decision mirror (pure, platform-parameterized)
 src/boot/expressions.ts single source of the boot expressions
 src/boot/*.template     patch template (placeholders)
@@ -392,12 +422,13 @@ src/detector.ts         availability + version probing (Git Bash aware)
 src/runtime-snapshot.ts immutable active-shell snapshot
 src/agent-shell.ts      the adaptation algorithm (capability→ensure→verify→hide→shadow→verify)
 src/agent/install.ts    lifecycle wiring + the prompt-assembly barrier
-src/compat/rc6-agent.ts the ONLY module that speaks to DSH rc.6 internals
+src/compat/rc6-agent.ts the ONLY module that speaks to DSH tool/prompt/agent internals
+src/compat/settings-surface.ts the ONLY module that speaks to the ctx.settings surface
 src/web.ts              state/action endpoints, detection cache
 src/types.ts            shared host types
 src/client/*            Web plugin: locale, controller, DshSelect, page, entry
 cordis.patch.yml        shipped bundle patch (rendered)
 scripts/*               clean-build, renderer, client bundler, lint
 tests/*                 unit + boot-expression + agent + client contract suites
-tests/helpers/*         the rc.6-faithful fake agent host
+tests/helpers/*         the DSH-faithful fake agent host
 ```

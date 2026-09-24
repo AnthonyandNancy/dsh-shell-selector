@@ -1,13 +1,16 @@
 /**
  * Web-profile endpoint: the Settings page's read/write surface.
  *
- * The `shell-selector` settings namespace is deliberately NOT exposed through
- * the settings RPC (the Web exposure list is owned by the host api-proxy), so
- * the browser talks to this plugin through its own same-origin JSON endpoint,
- * exactly like `dsh-vision-cloud` does. Every write is validated against the
- * schemastery schema and committed through the settings service, which
- * persists to `$DSH_HOME/settings.yaml`; the running process's executor stack
- * is never touched — changes take effect on the next boot.
+ * The plugin speaks over its own same-origin JSON endpoint instead of the
+ * settings API, because the page needs more than a form: the immutable boot
+ * snapshot, the live detection sweep, and the restart verdict. The write side
+ * is still the settings service — `ctx.settings.replace(entryId, section,
+ * revision)` — so the value lands on the `shell-selector` profile row (the
+ * document the boot expressions read) with conflict detection intact.
+ *
+ * DSH 0.1.7-rc.1 reconciles that entry after a write, which re-enters the
+ * plugin's `apply()` with the new configuration; THIS process keeps the shell
+ * it booted with, because the executor row was decided at startup.
  *
  * @module dsh-shell-selector/web
  */
@@ -93,9 +96,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Build the full state the Settings page renders. */
-export function buildState(backend: ShellSelectorBackend): ShellSelectorState {
-  const configured = backend.settings.get()
+/**
+ * Build the full state the Settings page renders.
+ *
+ * @param backend - the live runtime facts.
+ * @param configuredOverride - the configuration to report; defaults to the one
+ *   this fiber was composed with. A save passes the freshly written value,
+ *   because reconciling the entry disposes this fiber before it could observe
+ *   that value itself.
+ */
+export function buildState(
+  backend: ShellSelectorBackend,
+  configuredOverride?: ShellSelectorSettings,
+): ShellSelectorState {
+  const configured = configuredOverride ?? backend.settings.get()
   const availability = backend.availability()
   const next = resolveEffective(configured, backend.platform, availability)
   const activeMissing = !availability[backend.snapshot.kind]
@@ -151,7 +165,7 @@ async function handleAction(backend: ShellSelectorBackend, req: IncomingMessage,
       }
       const normalized = normalizeConfig(validated.value)
       await backend.settings.replace(normalized, expectedRevision)
-      responseJson(res, 200, { ok: true, value: buildState(backend) })
+      responseJson(res, 200, { ok: true, value: buildState(backend, normalized) })
       return
     }
     requestError(res, 400, 'bad-request', `unknown action ${JSON.stringify(payload['action'])}`)
@@ -188,7 +202,9 @@ export function installShellSelectorWeb(ctx: Context, backend: ShellSelectorBack
       requestError(res, 405, 'method-not-allowed', 'POST only')
       return
     }
-    void handleAction(backend, req, res)
+    // Returned, not dropped: the caller can await the write, and a rejected
+    // promise can never escape as an unhandled rejection.
+    return handleAction(backend, req, res)
   })
   return () => {
     for (const dispose of disposers.splice(0)) dispose()

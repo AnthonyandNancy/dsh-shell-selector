@@ -7,12 +7,20 @@
  * (`bash-sandbox` / `pwsh-sandbox`). Those expressions cannot import anything:
  * the loader evaluates them with `new Function("ctx", "expr", "with(ctx){return
  * eval(expr)}")` inside a bare Cordis context where only `process`, `Buffer`,
- * `fetch` and `globalThis` exist. Everything below is therefore one
- * self-contained JavaScript block, evaluated verbatim by the Loader.
+ * `fetch`, `globalThis` and the loader context itself (`ctx.baseUrl`) exist.
+ * Everything below is therefore one self-contained JavaScript block, evaluated
+ * verbatim by the Loader.
+ *
+ * Where the configuration lives moved in DSH 0.1.7-rc.1: the persisted
+ * document is the profile patch row (`cordis.patch.yml` -> `- id:
+ * shell-selector`), and `ctx.baseUrl` is the profile directory holding it. The
+ * retired `$DSH_HOME/settings.yaml` stays as a second source, so an
+ * installation that has not been migrated yet still resolves.
  *
  * The same decision is mirrored in TypeScript (`../resolver.ts`) for the
  * host-side runtime state; `tests/expressions.test.ts` evaluates these exact
- * strings against a fake `$DSH_HOME` and asserts they agree with the mirror.
+ * strings against a fake `$DSH_HOME` and a fake profile directory, and asserts
+ * they agree with the mirror.
  *
  * @module dsh-shell-selector/boot-expressions
  */
@@ -23,7 +31,7 @@
  */
 export type BootKind = 'platform' | 'bash' | 'pwsh' | 'powershell'
 
-/** Raw `shell-selector` settings section as the boot expressions read it. */
+/** Raw `shell-selector` configuration as the boot expressions read it. */
 export interface BootConfig {
   mode: 'default' | 'fallback' | 'explicit'
   shell?: 'bash' | 'pwsh' | 'powershell'
@@ -37,8 +45,104 @@ export interface BootConfig {
  * shipped base patch expressions.
  */
 export const EXPRESSION_HELPERS = String.raw`(() => {
+  const dshSsrReadProfilePatches = () => {
+    const files = [];
+    const seen = new Set();
+    const add = (value) => {
+      if (typeof value !== 'string' || value.length === 0) return;
+      const path = process.getBuiltinModule('node:path');
+      const url = process.getBuiltinModule('node:url');
+      let file;
+      try {
+        file = value.startsWith('file:')
+          ? url.fileURLToPath(new URL('cordis.patch.yml', value))
+          : path.resolve(value, 'cordis.patch.yml');
+      } catch (err) {
+        return;
+      }
+      if (seen.has(file)) return;
+      seen.add(file);
+      files.push(file);
+    };
+    // The Loader's base URL is the profile directory, so ctx.baseUrl names the
+    // very document the user's shell-selector row is written to.
+    try {
+      add(typeof ctx === 'object' && ctx !== null ? ctx.baseUrl : undefined);
+    } catch (err) {}
+    try {
+      const path = process.getBuiltinModule('node:path');
+      const os = process.getBuiltinModule('node:os');
+      const env = process.env.DSH_HOME;
+      const home = env && String(env).trim() ? path.resolve(String(env).trim()) : path.join(os.homedir(), '.dsh');
+      const profile = process.env.DSH_PROFILE;
+      if (profile && String(profile).trim()) add(path.join(home, 'profiles', String(profile).trim()));
+    } catch (err) {}
+    return files;
+  };
+  const dshSsrParseEntryConfig = (text, entryId) => {
+    const assign = (state, key, rawValue) => {
+      const value = String(rawValue).replace(/\s+#.*$/u, '').trim().replace(/^["']|["']$/gu, '').trim();
+      if (value.length === 0) return;
+      if (key === 'mode') state.mode = value;
+      else if (key === 'shell') state.shell = value;
+    };
+    const lines = String(text).split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!/^-\s*id\s*:/u.test(trimmed)) continue;
+      const idValue = trimmed
+        .replace(/^-\s*id\s*:\s*/u, '')
+        .replace(/\s+#.*$/u, '')
+        .trim()
+        .replace(/^["']|["']$/gu, '');
+      if (idValue !== entryId) continue;
+      const state = { mode: undefined, shell: undefined };
+      const entryIndent = line.length - line.trimStart().length;
+      let configIndent = -1;
+      for (let j = i + 1; j < lines.length; j++) {
+        const row = lines[j];
+        const inner = row.trim();
+        if (inner.length === 0 || inner.startsWith('#')) continue;
+        const indent = row.length - row.trimStart().length;
+        if (indent <= entryIndent) break;
+        const config = /^config\s*:\s*(.*)$/u.exec(inner);
+        if (configIndent < 0) {
+          if (config === null) continue;
+          const inline = config[1].trim();
+          if (inline.startsWith('{')) {
+            for (const part of inline.replace(/^\{|\}$/gu, '').split(',')) {
+              const pair = /^\s*([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$/u.exec(part);
+              if (pair !== null) assign(state, pair[1], pair[2]);
+            }
+            return state;
+          }
+          configIndent = indent;
+          continue;
+        }
+        if (indent <= configIndent) break;
+        const pair = /^([A-Za-z0-9_-]+)\s*:\s*(.*?)\s*$/u.exec(inner);
+        if (pair !== null) assign(state, pair[1], pair[2]);
+      }
+      return state;
+    }
+    return { mode: undefined, shell: undefined };
+  };
   const dshSsrReadConfig = () => {
     const fs = process.getBuiltinModule('node:fs');
+    const modeOf = (value) => (value === 'fallback' || value === 'explicit' ? value : 'default');
+    // DSH 0.1.7-rc.1 persists configuration on the profile patch row, because
+    // $DSH_HOME/settings.yaml was retired into the profile by the settings
+    // service. Read that row first; the legacy document stays as the second
+    // source so a not-yet-migrated rc.6 installation still resolves.
+    for (const file of dshSsrReadProfilePatches()) {
+      try {
+        const row = dshSsrParseEntryConfig(fs.readFileSync(file, 'utf8'), 'shell-selector');
+        if (row.mode !== undefined || row.shell !== undefined) {
+          return { mode: modeOf(row.mode), shell: row.shell };
+        }
+      } catch (err) {}
+    }
     const os = process.getBuiltinModule('node:os');
     const path = process.getBuiltinModule('node:path');
     let home;

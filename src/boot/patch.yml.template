@@ -2,8 +2,9 @@
 # profile / home / --patch overlays.
 #
 # THE SHELL STACK IS DECIDED AT PROCESS STARTUP, NEVER AT RUNTIME. The `!!js`
-# expressions below read `$DSH_HOME/settings.yaml` once, while the loader
-# activates these rows; nothing in this file runs after boot.
+# expressions below read the `shell-selector` profile patch row once — falling
+# back to the retired `$DSH_HOME/settings.yaml` — while the loader activates
+# these rows; nothing in this file runs after boot.
 #
 # The expressions are GENERATED from src/boot/expressions.ts by
 # scripts/render-patch.mjs — do not edit them by hand. They are evaluated by

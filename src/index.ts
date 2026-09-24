@@ -7,8 +7,15 @@
  * anything. The shell swap happens at boot, in the composition layer, via the
  * bundle patch expressions (`cordis.patch.yml`).
  *
- * This apply() function therefore only: registers the settings namespace,
- * captures the immutable boot snapshot, prepares the Bash PATH for Git for
+ * DSH 0.1.7-rc.1 owns configuration differently from rc.6: the plugin declares
+ * a Config schema (`./settings.ts`), the Loader passes the resolved profile row
+ * to `apply()`, and `ctx.settings` edits that row. A save reconciles the entry,
+ * so this function runs again with the new config. The boot facts — what THIS
+ * process actually composed — are therefore frozen on the first apply of the
+ * process and never recomputed: "currently active" stays a statement about the
+ * running process and `restartRequired` remains honest.
+ *
+ * `apply()` only: freezes boot facts, prepares the Bash PATH for Git for
  * Windows, installs the per-agent Shell Tool adaptation, serves the Settings
  * endpoint, and reports the restart requirement.
  *
@@ -18,21 +25,50 @@
 import { readFileSync } from 'node:fs'
 import { dirname, delimiter } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import {
-  SHELL_SELECTOR_SETTINGS_NAMESPACE,
-  ShellSelectorSchema,
-} from './settings.js'
+import { SHELL_SELECTOR_ENTRY_ID, configFromEntry, type ShellSelectorSettings } from './settings.js'
+import { settingsOf } from './compat/settings-surface.js'
 import { bashAvailability, pwshAvailability, windowsPowerShellAvailability } from './detector.js'
-import { resolveEffective, resolvedShellKind, type EffectiveDecision } from './resolver.js'
+import { resolveEffective, resolvedShellKind, type EffectiveDecision, type ShellId } from './resolver.js'
 import { createRuntimeSnapshot } from './runtime-snapshot.js'
 import { DetectionCache, installShellSelectorWeb, type ShellSelectorBackend } from './web.js'
 import { installAgentShellAdaptation } from './agent/install.js'
+import type { ActiveShell } from './types.js'
 
 /** Stable Cordis plugin name (the bundle patch inserts a row with this package). */
 export const name = 'shell-selector'
 
-/** The settings service must exist before this plugin registers its namespace. */
+/** The settings service must exist before this plugin reads or writes its row. */
 export const inject = ['settings']
+
+/** The Loader's Config schema — also the Settings form projection. */
+export { Config } from './settings.js'
+
+/** What this process composed at boot: frozen, never revisited. */
+interface BootFacts {
+  /** The configuration this process booted with. */
+  config: ShellSelectorSettings
+  /** The boot decision the composition made from that configuration. */
+  decision: EffectiveDecision
+  /** The shell the host executor actually provides. */
+  activeKind: ShellId
+  /** The immutable UI snapshot derived from the two above. */
+  snapshot: ActiveShell
+}
+
+/**
+ * Process-lifetime boot facts.
+ *
+ * Module scope, not context scope: reconciling a saved configuration re-enters
+ * `apply()` on the same process, and the new call must NOT redefine what this
+ * process booted with. ESM caches this module per process, so the first apply
+ * wins.
+ */
+let bootFacts: BootFacts | undefined
+
+/** Drop the frozen boot facts (tests; a running application never calls this). */
+export function resetBootFacts(): void {
+  bootFacts = undefined
+}
 
 function readPluginVersion(): string {
   try {
@@ -58,6 +94,25 @@ function snapshotExecutable(
   return platform === 'win32' ? pwshPath : bashPath
 }
 
+/** Capture the boot facts once per process. */
+function captureBootFacts(platform: string, config: ShellSelectorSettings, detection: DetectionCache): BootFacts {
+  const decision = resolveEffective(config, platform, detection.availability())
+  const activeKind = resolvedShellKind(decision, platform)
+  const snapshot = createRuntimeSnapshot({
+    platform,
+    config,
+    decision,
+    executable: snapshotExecutable(
+      platform,
+      decision,
+      bashAvailability(platform).path,
+      pwshAvailability().path,
+      windowsPowerShellAvailability(platform).path,
+    ),
+  })
+  return { config, decision, activeKind, snapshot }
+}
+
 /**
  * When the active shell is Bash on Windows and the resolved Bash is a Git for
  * Windows installation that is not already on PATH, prepend its directory to
@@ -66,7 +121,7 @@ function snapshotExecutable(
  * Git Bash that was never manually added to PATH. The change is process-local
  * and never writes the registry or user environment.
  */
-function prepareBashPath(platform: string, activeKind: ReturnType<typeof resolvedShellKind>): void {
+function prepareBashPath(platform: string, activeKind: ShellId): void {
   if (platform !== 'win32' || activeKind !== 'bash') return
   const bash = bashAvailability(platform)
   if (!bash.available || bash.path === undefined) return
@@ -78,66 +133,55 @@ function prepareBashPath(platform: string, activeKind: ReturnType<typeof resolve
 }
 
 /**
- * Plugin apply: register settings, capture the boot snapshot, prepare Bash
- * PATH, install the per-agent Shell Tool adaptation, install the Web endpoint,
- * and start background detection.
+ * Plugin apply: freeze the boot facts, prepare the Bash PATH, install the
+ * per-agent Shell Tool adaptation, install the Web endpoint, and start
+ * background detection.
+ *
+ * @param ctx - the plugin context.
+ * @param rawConfig - the Loader-resolved `shell-selector` profile row config.
  */
-export function apply(ctx: Context): () => void {
+export function apply(ctx: Context, rawConfig?: unknown): () => void {
   const pluginVersion = readPluginVersion()
   const platform = process.platform
-  const settingsScope = ctx.settings.register(SHELL_SELECTOR_SETTINGS_NAMESPACE, ShellSelectorSchema, {
-    base: { mode: 'default' },
-    applies: 'restart',
-  })
-
-  // Boot facts, captured once and never revisited.
-  const bootConfig = settingsScope.get()
+  const configured = configFromEntry(rawConfig)
   const detection = new DetectionCache(platform)
-  const bootDecision = resolveEffective(bootConfig, platform, detection.availability())
-  const bootActiveKind = resolvedShellKind(bootDecision, platform)
-  const snapshot = createRuntimeSnapshot({
-    platform,
-    config: bootConfig,
-    decision: bootDecision,
-    executable: snapshotExecutable(
-      platform,
-      bootDecision,
-      bashAvailability(platform).path,
-      pwshAvailability().path,
-      windowsPowerShellAvailability(platform).path,
-    ),
-  })
+  bootFacts ??= captureBootFacts(platform, configured, detection)
+  const facts = bootFacts
 
-  prepareBashPath(platform, bootActiveKind)
+  prepareBashPath(platform, facts.activeKind)
 
   // Agent plane: each preset's composition decides WHETHER an agent holds the
   // standard Shell capability; this adaptation decides WHICH dialect it speaks.
   // It adds the target tool before removing the mismatched one, keeps the tool
   // schema and the prompt in step, and fails the session loudly rather than
   // letting an agent reach the model with a wrong or empty shell surface.
-  installAgentShellAdaptation(ctx, bootActiveKind)
+  installAgentShellAdaptation(ctx, facts.activeKind)
 
+  const settings = settingsOf(ctx)
   const revisionOf = (): number => {
-    const descriptor = ctx.settings.describe().find((row) => row.ns === SHELL_SELECTOR_SETTINGS_NAMESPACE)
+    const descriptor = settings?.describe().find((row) => row.ns === SHELL_SELECTOR_ENTRY_ID)
     return descriptor?.revision ?? 0
   }
 
   const backend: ShellSelectorBackend = {
     pluginVersion,
     platform,
-    snapshot,
-    snapshotDecision: bootDecision,
+    snapshot: facts.snapshot,
+    snapshotDecision: facts.decision,
     settings: {
-      get: () => settingsScope.get(),
-      // CAS lives on the provider surface (the scope has no revision param).
-      replace: (section, expectedRevision) =>
-        ctx.settings.replace(SHELL_SELECTOR_SETTINGS_NAMESPACE, section, expectedRevision),
+      // The live value is the row the Loader last resolved for THIS fiber; a
+      // save reconciles the entry and re-enters apply() with the new value.
+      get: () => configured,
+      replace: async (section, expectedRevision) => {
+        if (settings === undefined) throw new Error('the settings service is not composed')
+        await settings.replace(SHELL_SELECTOR_ENTRY_ID, section, expectedRevision)
+      },
     },
     availability: () => detection.availability(),
     detected: () => detection.detected(),
     refreshDetection: () => detection.refresh(platform),
     revision: revisionOf,
-    writable: () => (ctx.settings as unknown as { writable?: boolean }).writable ?? true,
+    writable: () => settings?.writable ?? true,
   }
 
   // Web routes only when a web server is present (web profile); the fiber is
@@ -152,9 +196,9 @@ export function apply(ctx: Context): () => void {
 
   ctx.logger.info(
     'dsh-shell-selector: active shell %s (mode %s)%s; restartRequired on next settings change.',
-    snapshot.kind,
-    snapshot.mode,
-    snapshot.shell === undefined ? '' : `, shell ${snapshot.shell}`,
+    facts.snapshot.kind,
+    facts.snapshot.mode,
+    facts.snapshot.shell === undefined ? '' : `, shell ${facts.snapshot.shell}`,
   )
 
   return () => {

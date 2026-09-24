@@ -13,6 +13,7 @@
 import { mkdtempSync, mkdirSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   BASH_SANDBOX_DISABLED_EXPR,
@@ -122,9 +123,19 @@ function configOf(body: string): BootConfig {
   return cfg
 }
 
-/** Run one expression against the fabricated world and return its value. */
-function run(expr: string, platform: string, env: Record<string, string>): unknown {
-  return evaluate({ process: fakeProcess(platform, env) }, expr)
+/**
+ * Run one expression against the fabricated world and return its value.
+ *
+ * `extra` carries the Loader context: the expressions read `ctx.baseUrl` to
+ * locate the profile directory DSH 0.1.7-rc.1 persists configuration in.
+ */
+function run(
+  expr: string,
+  platform: string,
+  env: Record<string, string>,
+  extra: Record<string, unknown> = {},
+): unknown {
+  return evaluate({ process: fakeProcess(platform, env), ...extra }, expr)
 }
 
 interface MatrixCell {
@@ -195,5 +206,87 @@ describe('boot expressions agree with the resolver mirror', () => {
     expect(patchTemplate).toContain('{{BASH_SANDBOX_DISABLED_EXPR}}')
     expect(patchTemplate).toContain('{{PWSH_SANDBOX_DISABLED_EXPR}}')
     expect(patchTemplate).toContain('{{PWSH_PATH_EXPR}}')
+  })
+})
+
+/**
+ * DSH 0.1.7-rc.1 moved configuration onto the profile patch row: the settings
+ * service retires `$DSH_HOME/settings.yaml` into the profile, and the Loader
+ * hands the expressions a base URL pointing at that profile directory. These
+ * cases pin the second source — the row wins when present, the legacy document
+ * still resolves when it is not, and an unrelated row never leaks in.
+ */
+describe('the profile patch row as the configuration source', () => {
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'dsh-shell-selector-row-'))
+    home = join(root, 'home')
+    settingsFile = join(home, 'settings.yaml')
+    ensureDirs(home)
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  /** A fabricated profile directory plus the context the Loader would pass. */
+  function profileContext(): { ctx: Record<string, unknown>; patchPath: string } {
+    const profileDir = join(root, 'profiles', 'web')
+    ensureDirs(profileDir)
+    return {
+      ctx: { baseUrl: pathToFileURL(join(profileDir, 'cordis.yml')).href },
+      patchPath: join(profileDir, 'cordis.patch.yml'),
+    }
+  }
+
+  /** Whether a row expression enables its executor (disabled === false). */
+  function enabled(
+    expr: string,
+    env: Record<string, string>,
+    ctx: Record<string, unknown>,
+  ): boolean {
+    return run(expr, 'win32', env, ctx) === false
+  }
+
+  it('enables the shell a block-style row selects', () => {
+    const { ctx, patchPath } = profileContext()
+    writeFileSync(
+      patchPath,
+      ['- id: shell-selector', '  name: dsh-shell-selector', '  config:', '    mode: explicit', '    shell: bash', ''].join('\n'),
+    )
+    const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
+    expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(true)
+    expect(enabled(PWSH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(false)
+  })
+
+  it('reads a flow-style row (configuration on one line)', () => {
+    const { ctx, patchPath } = profileContext()
+    writeFileSync(patchPath, "- id: shell-selector\n  config: {mode: 'explicit', shell: 'bash'}\n")
+    const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
+    expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(true)
+  })
+
+  it('prefers the row over a legacy settings.yaml', () => {
+    const { ctx, patchPath } = profileContext()
+    writeSettings('shell-selector:\n  mode: explicit\n  shell: bash\n')
+    writeFileSync(patchPath, '- id: shell-selector\n  config:\n    mode: default\n')
+    const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
+    // `mode: default` keeps the shipped platform rule: PowerShell on Windows.
+    expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(false)
+    expect(enabled(PWSH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(true)
+  })
+
+  it('ignores rows that belong to other entries', () => {
+    const { ctx, patchPath } = profileContext()
+    writeSettings('shell-selector:\n  mode: explicit\n  shell: bash\n')
+    writeFileSync(patchPath, '- id: other-plugin\n  config:\n    mode: explicit\n    shell: bash\n')
+    const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
+    expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(true)
+  })
+
+  it('falls back to the platform rule when the row carries no configuration', () => {
+    const { ctx, patchPath } = profileContext()
+    writeFileSync(patchPath, '- id: shell-selector\n  name: dsh-shell-selector\n')
+    const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
+    expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(false)
   })
 })
