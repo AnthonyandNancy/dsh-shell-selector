@@ -8,7 +8,7 @@
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web（设置 → **Shell 解析器** 标签页） |
-| 安装 | `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
+| 安装 | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector`——或发布产物 `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
 | License | MIT |
 
 > **重启要求** — 更改 Shell 解析器 **不会** 热替换当前进程。选择会立即保存，
@@ -143,6 +143,12 @@ npm pack --dry-run
 
 - `scripts/render-patch.mjs` 从 `src/boot/expressions.ts`（单一事实来源）
   生成 `cordis.patch.yml`；`scripts/lint.mjs` 校验已提交文件同步。
+- `lib/` 同样已提交：只要包声明了 `prepublish`/`prepack`/`publish` 脚本，而
+  抓取到的 tarball 里缺少 `main` 指向的文件，pnpm 就判定它需要构建；pnpm 11
+  会拒绝该构建，除非用户在 profile 的 `allowBuilds` 中放行。把构建产物一并
+  发布，就不需要执行任何构建脚本。改动 `src/` 后请运行 `pnpm build` 并提交
+  重新生成的 `lib/`；一旦已提交产物与 `src/` 不再一致，CI 会失败。
+  `prepack` 保留，供 `npm pack` 使用。
 - `scripts/build-client.mjs` 将浏览器客户端打包为 `lib/client.js`（DSH Web
   模块加载器格式）。
 - `tests/expressions.test.ts` 在构造的环境中执行启动表达式，并断言它们与

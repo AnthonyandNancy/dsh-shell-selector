@@ -8,7 +8,7 @@ Choose which shell interpreter DeepSeek Harness runs commands with —
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web (Settings → **Shell Interpreter** tab) |
-| Install | `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
+| Install | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector` — or the release tarball, `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
 | License | MIT |
 
 > **Restart requirement** — Changing the Shell interpreter does **not** hot-swap
@@ -167,6 +167,14 @@ npm pack --dry-run
 - `scripts/render-patch.mjs` generates `cordis.patch.yml` from
   `src/boot/expressions.ts` (single source of truth); `scripts/lint.mjs`
   verifies the committed file is in sync.
+- `lib/` is committed too: a git-hosted install (`dsh plugin add github:…`) is
+  judged by pnpm to need a build whenever a `prepublish`/`prepack`/`publish`
+  script exists and the `main` file is missing from the fetched tarball — and
+  pnpm 11 refuses that build unless the user allows it in the profile's
+  `allowBuilds`. Shipping the built files means no build script has to run.
+  After changing `src/`, run `pnpm build` and commit the rebuilt `lib/`;
+  CI fails when the committed artifact no longer matches `src/`.
+  `prepack` stays for `npm pack`.
 - `scripts/build-client.mjs` bundles the browser client into
   `lib/client.js` (the DSH Web module-loader format).
 - `tests/expressions.test.ts` evaluates the boot expressions against a

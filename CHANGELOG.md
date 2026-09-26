@@ -2,6 +2,32 @@
 
 All notable changes to `dsh-shell-selector` are documented in this file.
 
+## [0.2.2] — unreleased
+
+### Fixes
+
+- **Installing from GitHub no longer dies with
+  `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`.** pnpm 11 judges a git-hosted
+  dependency to need a build when it declares a
+  `prepublish`/`prepack`/`publish` script **and** the file its `main` names is
+  missing from the fetched tarball, and it runs that build only with the user's
+  approval in the profile's `allowBuilds`. `lib/` was gitignored, so
+  `dsh plugin add github:AnthonyandNancy/dsh-shell-selector` stopped with
+  `The git-hosted package "dsh-shell-selector@0.2.1" needs to execute build
+  scripts but is not in the "allowBuilds" allowlist` before any of the plugin's
+  own code ran. The build output is now committed, so pnpm finds
+  `lib/index.js` and skips `prepack` entirely: installing asks for no build
+  approval, and nothing runs with the host user's permissions. `prepack` stays
+  for `npm pack`.
+
+### Changed
+
+- `README.md` / `README.zh.md` install rows name the GitHub spec first and the
+  release tarball second; the Development section records that `lib/` is a
+  committed artifact and must be rebuilt together with `src/`.
+- CI rebuilds the plugin and fails when the committed `lib/` or
+  `cordis.patch.yml` no longer matches what `src/` produces.
+
 ## [0.2.1] — 2026-09-24
 
 ### Fixes
