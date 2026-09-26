@@ -39,5 +39,14 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Verify committed lib matches src
+        # `lib/` is committed: a git-hosted install must find `lib/index.js`
+        # without running `prepack` (pnpm 11 blocks that build script). A stale
+        # committed artifact is therefore shipped as-is, so the rebuild above
+        # must reproduce it byte for byte. One platform is enough — it also
+        # proves the artifact does not depend on the machine that built it.
+        if: matrix.os == 'ubuntu-latest'
+        run: git diff --exit-code -- lib cordis.patch.yml
+
       - name: Pack (dry-run)
         run: npm pack --dry-run
