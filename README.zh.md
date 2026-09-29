@@ -8,7 +8,7 @@
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web（设置 → **Shell 解析器** 标签页） |
-| 安装 | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector`——或发布产物 `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
+| 安装 | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector`——或发布产物 `dsh plugin add dsh-shell-selector-0.2.2.tgz` |
 | License | MIT |
 
 > **重启要求** — 更改 Shell 解析器 **不会** 热替换当前进程。选择会立即保存，

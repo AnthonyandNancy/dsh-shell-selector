@@ -6,6 +6,22 @@ All notable changes to `dsh-shell-selector` are documented in this file.
 
 ### Fixes
 
+- **DSH 0.2.0-rc.1 accepts the bundle again.** The nine `@deepseek-ai/dsh-*`
+  peers declared `^0.1.7-rc.1`, a caret range that stops below `0.2.0`, so the
+  host's compatibility verdict — `semver.satisfies(runtimeVersion, range,
+  { includePrerelease: true })` over every `@deepseek-ai/dsh` /
+  `@deepseek-ai/dsh-*` peer — reported every one of them and the plugin manager
+  refused the install as `incompatible-version`, rendered as
+  `dsh-shell-selector@0.2.1 与 DSH 0.2.0-rc.1 不兼容（要求 …）`. The boot-time
+  preflight applies the same verdict to the composition, where the
+  `shell-selector` row is disabled and a bundle layer that fails it is skipped
+  outright, so neither the host half nor the Settings tab loaded. Each peer now
+  declares `^0.1.7-rc.1 || ^0.2.0-rc.1`, so both runtimes stay claimed.
+- The runtime API surface this plugin actually uses is unchanged between the two
+  releases: `ctx.settings.describe()/replace()`, `ctx.webServer.register`,
+  `candidatePwshPaths`, the `settings.section` slot contract, and the
+  `@deepseek-ai/dsh-system-prompt` / `ctx.tools` scope surface the agent-plane
+  adaptation reads. Only the declared range moved; no `src/` file changed.
 - **Installing from GitHub no longer dies with
   `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`.** pnpm 11 judges a git-hosted
   dependency to need a build when it declares a

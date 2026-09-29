@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-selector",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Choose which shell interpreter DeepSeek Harness runs commands with (Bash / PowerShell 7 / Windows PowerShell). Changes apply on the next DeepSeek Harness restart.",
   "keywords": [
     "deepseek",
@@ -61,15 +61,15 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-home-paths": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-pwsh-local": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-tool-bash": "^0.1.7-rc.1",
-    "@deepseek-ai/dsh-tool-pwsh": "^0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-locale": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-home-paths": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-pwsh-local": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tool-bash": "^0.1.7-rc.1 || ^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tool-pwsh": "^0.1.7-rc.1 || ^0.2.0-rc.1",
     "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0"
   },

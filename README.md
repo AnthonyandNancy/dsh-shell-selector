@@ -8,7 +8,7 @@ Choose which shell interpreter DeepSeek Harness runs commands with —
 |---|---|
 | Host | Windows / macOS / Linux |
 | Client | Web (Settings → **Shell Interpreter** tab) |
-| Install | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector` — or the release tarball, `dsh plugin add dsh-shell-selector-0.2.1.tgz` |
+| Install | `dsh plugin add github:AnthonyandNancy/dsh-shell-selector` — or the release tarball, `dsh plugin add dsh-shell-selector-0.2.2.tgz` |
 | License | MIT |
 
 > **Restart requirement** — Changing the Shell interpreter does **not** hot-swap
