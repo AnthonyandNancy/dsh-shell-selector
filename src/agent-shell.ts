@@ -23,6 +23,11 @@
  * while `bash` had never been registered collapsed the catalog to nothing. Any
  * failure rolls the whole transaction back, so a partial scope is impossible.
  *
+ * On DSH 0.2.2-rc.1 the model-facing schema is owned by the tool registry's
+ * prompt provider, not by the assembly, so step 4 is what actually removes the
+ * tool from what the model sees; {@link reconcileAssembly} only handles the
+ * guidance section there. See `./compat/rc6-agent.ts` for the host code path.
+ *
  * @module dsh-shell-selector/agent-shell
  */
 
@@ -30,9 +35,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ShellId } from './resolver.js'
 import {
   SHELL_PROMPT_SECTION_ORDER,
+  SHELL_SECTION_ORDER_NAME,
   SHELL_TOOL_PACKAGE,
   agentScope,
   importShellToolPlugin,
+  isNativeToolWire,
   isToolRestrictable,
   isToolVisible,
   mountPlugin,
@@ -178,17 +185,23 @@ export function hideOppositeShellTool(
  * Blank the opposite tool's guidance section for this agent.
  *
  * A same-named section registered on the agent scope SHADOWS the inherited one,
- * and rc.6 drops empty sections when rendering the prompt — so the opposite
+ * and the host drops empty sections when rendering the prompt — so the opposite
  * dialect's guidance never reaches the model. This works on SECTION IDENTITY;
  * the plugin never rewrites prompt prose with string or regex replacement.
+ *
+ * The order is read from the host's own placement table when it exposes one
+ * (`getSectionOrder`, 0.2.1+), because 0.2.2-rc.1 moved the `tool:*` orders into
+ * central `SECTION_ORDERS`; the pinned constant is only a fallback.
  */
 export function shadowOppositeShellPrompt(
   prompt: Rc6SystemPromptService,
   opposite: ShellToolName,
 ): () => void {
+  const order =
+    prompt.getSectionOrder?.(SHELL_SECTION_ORDER_NAME[opposite]) ?? SHELL_PROMPT_SECTION_ORDER
   return prompt.section({
     name: shellPromptSection(opposite),
-    order: SHELL_PROMPT_SECTION_ORDER,
+    order,
     text: '',
   })
 }
@@ -352,17 +365,30 @@ export async function adaptAgentShell(
 }
 
 /**
- * Reconcile one prompt assembly with a completed adaptation.
+ * Bring one prompt assembly in line with a completed adaptation.
  *
- * rc.6 computes `assembly.tools` and `assembly.sections` BEFORE running the
- * `system-prompt/assemble` waterfall, so a listener receives a snapshot taken
- * at entry. If an assembly were ever entered while the adaptation was still in
- * flight, that snapshot would describe the un-adapted agent — and a router that
- * picks its platform shell from `assembly.tools` would read the wrong catalog.
+ * ## What changed in DSH 0.2.2-rc.1
  *
- * This re-derives the shell rows from the LIVE tool view and drops the opposite
- * guidance by section identity, so the tool schema and the prompt the model
- * receives always agree with the host executor.
+ * The old contract handed listeners an assembly that already contained `tools`,
+ * so this function could rewrite the model-facing schema in place. 0.2.2-rc.1
+ * moved the schema to a tool provider: `assemble()` builds
+ * `{ sections, contexts, variables }`, runs the waterfall, and only THEN
+ * attaches `tools`. A listener therefore receives an assembly with **no `tools`
+ * key**, and the previous `assembly.tools.filter(...)` was
+ * `TypeError: Cannot read properties of undefined (reading 'filter')`.
+ *
+ * The schema no longer needs rewriting here at all: the provider re-derives
+ * `definitions(scope, toolSet)` from the live registry on every assembly, so
+ * `tools.restrict()` (already applied by the adaptation, before this listener
+ * runs) is what removes the opposite tool from what the model sees. Reconcile
+ * now only guarantees two things that the registry cannot state for itself:
+ *
+ *   1. the opposite dialect's guidance section is dropped from the prompt, and
+ *   2. on hosts that DO carry `tools` in the assembly, the schema is corrected
+ *      the old way — so this module keeps working on 0.1.7-rc.1 and on any
+ *      future host that restores the field.
+ *
+ * It is idempotent and side-effect free: it never mutates `assembly`.
  */
 export function reconcileAssembly(
   assembly: Rc6PromptAssembly,
@@ -373,10 +399,27 @@ export function reconcileAssembly(
   if (outcome.kind === 'noop-no-capability') return assembly
   const { target, opposite } = outcome
 
-  const nextTools = assembly.tools.filter((tool) => tool.name !== opposite)
-  // Only the native wire carries end-capability tools; in Code Mode the wire
-  // holds `run_code` and the shells live in the SDK, so nothing is appended.
-  const native = (tools.modeFor?.(scope) ?? 'native') === 'native'
+  // The guidance section is a plain array on every host version; the opposite
+  // section is dropped by name so a stale snapshot cannot leak its prose.
+  const oppositeSection = shellPromptSection(opposite)
+  const sections = Array.isArray(assembly.sections)
+    ? assembly.sections.filter((section) => section.name !== oppositeSection)
+    : assembly.sections
+
+  // 0.2.2-rc.1: `tools` is attached AFTER this waterfall, so it is absent here.
+  // The registry is authoritative and already restricted; correct the snapshot
+  // only when the host actually supplied one (0.1.7-rc.1 and earlier).
+  const incoming = Array.isArray(assembly.tools) ? assembly.tools : undefined
+  if (incoming === undefined) {
+    return { ...assembly, sections }
+  }
+
+  const nextTools = incoming.filter((tool) => tool.name !== opposite)
+  // Only the native wire carries end-capability tools; in PTC/Code Mode the
+  // wire holds `run_code` and the shells live in the SDK, so nothing is
+  // appended. `modeFor` was removed in 0.2.2-rc.1, where this branch is dead
+  // anyway because `tools` never reaches the listener.
+  const native = isNativeToolWire(tools, scope)
   if (native && !nextTools.some((tool) => tool.name === target)) {
     const definition = tools.view(scope).visible.get(target)
     if (definition !== undefined) {
@@ -388,9 +431,5 @@ export function reconcileAssembly(
     }
   }
 
-  return {
-    ...assembly,
-    tools: nextTools,
-    sections: assembly.sections.filter((section) => section.name !== shellPromptSection(opposite)),
-  }
+  return { ...assembly, tools: nextTools, sections }
 }

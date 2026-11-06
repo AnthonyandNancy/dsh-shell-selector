@@ -2,6 +2,77 @@
 
 All notable changes to `dsh-shell-selector` are documented in this file.
 
+## [0.2.3] — unreleased
+
+Compatibility with **DSH 0.2.2-rc.1**. One defect and one adaptation.
+
+### Fixes
+
+- **`TypeError: Cannot read properties of undefined (reading 'filter')` on
+  every shell-capable agent.** DSH 0.2.2-rc.1 moved the model-facing tool schema
+  out of the prompt assembly: `SystemPrompt.assemble()` now builds
+  `{ sections, contexts, variables }`, runs the `system-prompt/assemble`
+  waterfall, and attaches `tools` only to the value it returns —
+  `return { ...transformed, tools }`. A waterfall listener therefore receives an
+  assembly with **no `tools` key**, and `reconcileAssembly()`'s
+  `assembly.tools.filter(...)` dereferenced `undefined`. Because that listener
+  runs at the prompt-assembly barrier, the throw failed the model step of every
+  agent whose preset granted a shell — for a preset with no shell tool the
+  reconciliation returned early and the same build looked healthy.
+
+  The schema no longer needs rewriting there at all. 0.2.2-rc.1's tool registry
+  owns it through a provider (`ctx.systemPrompt.tools(...)`) that re-derives
+  `definitions(scope, toolSet)` from the live registry on every assembly, so the
+  adaptation's `tools.restrict()` — which already ran, before this listener —
+  is what removes the opposite tool from what the model is offered.
+  `reconcileAssembly()` now drops the opposite guidance section by identity and
+  leaves `tools` **absent**, so the host's own `{ ...transformed, tools }` stays
+  authoritative. When a host *does* supply `tools` (0.1.7-rc.1 and earlier) the
+  previous correction still applies, so that line keeps working.
+
+  Reported stack head:
+  `TypeError: Cannot read properties of undefined (reading 'filter')` at
+  `reconcileAssembly (lib/agent-shell.js)`.
+
+### Changed
+
+- **`tools.modeFor()` is gone; nothing reads it unconditionally.** It was
+  removed in 0.2.2-rc.1 (the native/PTC split became a per-agent tool-executor
+  plugin, `tools.setExecutor`/`selectExecutor`). `isNativeToolWire()` treats its
+  absence as "native", which is the conservative answer: the registry is
+  authoritative and the append branch is unreachable on 0.2.2 anyway, where
+  `tools` never reaches the listener.
+- **`agent/created` is now awaited.** 0.2.2-rc.1 dispatches it through
+  `ctx.serial(...)` (it was a fire-and-forget `emit`), and `registry.announce()`
+  propagates a listener rejection — so a throwing listener now fails agent
+  creation instead of being logged. The lifecycle listener stays synchronous and
+  non-throwing; the adaptation's rejection is still re-raised from the awaited
+  barrier, where it names the real cause before any model request.
+- **Section order comes from the host's placement table.** 0.2.2-rc.1 moved
+  `tool:bash`/`tool:pwsh` orders into a central `SECTION_ORDERS` registry
+  (`TOOL_BASH: 1000`, `TOOL_PWSH: 1010`) exposed as
+  `systemPrompt.getSectionOrder(name)`. `shadowOppositeShellPrompt()` reads
+  through it and keeps the old `105` only as a fallback, so the shadowing
+  section keeps matching the section it shadows.
+- **New seam in `src/compat/rc6-agent.ts`**: `modelFacingTools()` reads the
+  model-facing schema from the live registry
+  (`tools.definitions()`/`schemas()`/`view()`), which is the 0.2.2 answer to the
+  removed `assembly.tools` input.
+- No manifest, boot-expression or client change was needed: `dsh-client-ui-primitives`
+  is provided in the browser by the Web frontend's own module registry
+  (`window.__ModuleLoader__`), not as an installed package, and the
+  `settings.section` slot, `ctx.settings.describe()/replace()`,
+  `ctx.webServer.register`, `candidatePwshPaths`/`pwshPath` and the
+  `settings.section` `{ id, order, label, inject }` contract are unchanged.
+  The `^0.1.7-rc.1 || ^0.2.0-rc.1` peer range already admits `0.2.2-rc.1`.
+
+### Added
+
+- `tests/dsh-0.2.2-contract.test.ts` pins the new contract: reconcile must not
+  throw on a `tools`-less assembly, must leave `tools` absent rather than
+  writing `[]`, must preserve `contexts`/`variables`, must not mutate its input,
+  and must still correct the 0.1.7 shape when `tools` is present.
+
 ## [0.2.2] — unreleased
 
 ### Fixes

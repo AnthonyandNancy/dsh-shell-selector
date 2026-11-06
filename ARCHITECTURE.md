@@ -237,10 +237,13 @@ plugin never rewrites prompt prose with string or regex replacement.
 
 #### The prompt-assembly barrier
 
-Two verified rc.6 facts require an enforcement point beyond `agent/created`:
+Two host facts require an enforcement point beyond `agent/created`:
 
-- `agent/created` is dispatched with a fire-and-forget `emit`, so a rejected
-  async listener is only logged — it cannot fail agent creation;
+- on DSH 0.1.7-rc.1 and earlier `agent/created` is dispatched with a
+  fire-and-forget `emit`, so a rejected async listener is only logged — it
+  cannot fail agent creation. On 0.2.2-rc.1 it is dispatched through
+  `ctx.serial(...)` and **is** awaited, so a throwing listener would fail agent
+  creation; the listener therefore never throws (see below);
 - mounting a tool plugin is asynchronous (`ctx.plugin()` activates one microtask
   later), so the adaptation cannot complete synchronously in that listener.
 
@@ -251,14 +254,47 @@ the prompt together. The barrier:
 
 - awaits the adaptation, and **throws** `ShellSelectorAgentAdaptationError` if it
   failed, so the session fails with the real cause before any LLM request;
-- re-derives the shell rows from the live tool view and drops the opposite
-  `tool:*` section, because rc.6 computes `assembly.tools` and
-  `assembly.sections` *before* running the waterfall — a listener sees a
-  snapshot taken at entry.
+- drops the opposite `tool:*` section by identity.
+
+##### Who owns the tool schema
+
+This is the one place where 0.2.2-rc.1 changed the contract.
+
+Up to 0.1.7-rc.1, `assemble()` built `{ sections, tools, variables }` and handed
+that object to the waterfall, so a listener could rewrite the model-facing
+schema and had to, because the snapshot it saw was taken *before* the
+adaptation's mount settled. 0.2.2-rc.1 moved the schema to a registered tool
+provider: `assemble()` builds `{ sections, contexts, variables }`, runs the
+waterfall, and attaches `tools` only to what it returns —
+
+```js
+const assembly = { sections, contexts, variables }
+const transformed = await this.ctx.waterfall(..., 'system-prompt/assemble', assembly, ...)
+return { ...transformed, tools }        // ← added on the way OUT
+```
+
+A listener therefore receives an assembly with **no `tools` key**. The old
+`assembly.tools.filter(...)` was
+`TypeError: Cannot read properties of undefined (reading 'filter')`, thrown at
+the barrier and so failing the model step of every agent whose preset granted a
+shell.
+
+The schema no longer needs rewriting at all: the provider re-derives
+`definitions(scope, toolSet)` from the live registry on every assembly, so the
+adaptation's `tools.restrict()` — applied before this listener runs — is what
+removes the opposite tool from what the model is offered. `reconcileAssembly()`
+consequently drops the guidance section and leaves `tools` **absent**, keeping
+the host's own object authoritative. When a host *does* supply `tools` (0.1.7
+and earlier) the previous correction still runs, so that line keeps working.
+
+`tools.modeFor()` was removed in 0.2.2-rc.1 along with that split; the native/PTC
+decision became a per-agent executor plugin (`tools.setExecutor` /
+`selectExecutor`). `isNativeToolWire()` treats a missing probe as native, which
+is the conservative answer — the append branch is unreachable on 0.2.2 anyway.
 
 Because a preset registers its own `system-prompt/assemble` hook on the standing
 scope before any agent scope exists, this agent-scope barrier always runs nested
-**inside** it. The corrected catalog is therefore what the preset's
+**inside** it. The corrected prompt is therefore what the preset's
 `await next()` observes, which is what fixes the router at the source.
 
 In Code Mode the wire surface carries `run_code` and the shells live in the SDK

@@ -23,6 +23,11 @@
  * while `bash` had never been registered collapsed the catalog to nothing. Any
  * failure rolls the whole transaction back, so a partial scope is impossible.
  *
+ * On DSH 0.2.2-rc.1 the model-facing schema is owned by the tool registry's
+ * prompt provider, not by the assembly, so step 4 is what actually removes the
+ * tool from what the model sees; {@link reconcileAssembly} only handles the
+ * guidance section there. See `./compat/rc6-agent.ts` for the host code path.
+ *
  * @module dsh-shell-selector/agent-shell
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -92,9 +97,13 @@ export declare function hideOppositeShellTool(agentCtx: Context, tools: Rc6Tools
  * Blank the opposite tool's guidance section for this agent.
  *
  * A same-named section registered on the agent scope SHADOWS the inherited one,
- * and rc.6 drops empty sections when rendering the prompt — so the opposite
+ * and the host drops empty sections when rendering the prompt — so the opposite
  * dialect's guidance never reaches the model. This works on SECTION IDENTITY;
  * the plugin never rewrites prompt prose with string or regex replacement.
+ *
+ * The order is read from the host's own placement table when it exposes one
+ * (`getSectionOrder`, 0.2.1+), because 0.2.2-rc.1 moved the `tool:*` orders into
+ * central `SECTION_ORDERS`; the pinned constant is only a fallback.
  */
 export declare function shadowOppositeShellPrompt(prompt: Rc6SystemPromptService, opposite: ShellToolName): () => void;
 /**
@@ -136,17 +145,30 @@ export interface AdaptAgentShellOptions {
  */
 export declare function adaptAgentShell(agent: AgentLike, activeKind: ShellId, options?: AdaptAgentShellOptions): Promise<AdaptationOutcome>;
 /**
- * Reconcile one prompt assembly with a completed adaptation.
+ * Bring one prompt assembly in line with a completed adaptation.
  *
- * rc.6 computes `assembly.tools` and `assembly.sections` BEFORE running the
- * `system-prompt/assemble` waterfall, so a listener receives a snapshot taken
- * at entry. If an assembly were ever entered while the adaptation was still in
- * flight, that snapshot would describe the un-adapted agent — and a router that
- * picks its platform shell from `assembly.tools` would read the wrong catalog.
+ * ## What changed in DSH 0.2.2-rc.1
  *
- * This re-derives the shell rows from the LIVE tool view and drops the opposite
- * guidance by section identity, so the tool schema and the prompt the model
- * receives always agree with the host executor.
+ * The old contract handed listeners an assembly that already contained `tools`,
+ * so this function could rewrite the model-facing schema in place. 0.2.2-rc.1
+ * moved the schema to a tool provider: `assemble()` builds
+ * `{ sections, contexts, variables }`, runs the waterfall, and only THEN
+ * attaches `tools`. A listener therefore receives an assembly with **no `tools`
+ * key**, and the previous `assembly.tools.filter(...)` was
+ * `TypeError: Cannot read properties of undefined (reading 'filter')`.
+ *
+ * The schema no longer needs rewriting here at all: the provider re-derives
+ * `definitions(scope, toolSet)` from the live registry on every assembly, so
+ * `tools.restrict()` (already applied by the adaptation, before this listener
+ * runs) is what removes the opposite tool from what the model sees. Reconcile
+ * now only guarantees two things that the registry cannot state for itself:
+ *
+ *   1. the opposite dialect's guidance section is dropped from the prompt, and
+ *   2. on hosts that DO carry `tools` in the assembly, the schema is corrected
+ *      the old way — so this module keeps working on 0.1.7-rc.1 and on any
+ *      future host that restores the field.
+ *
+ * It is idempotent and side-effect free: it never mutates `assembly`.
  */
 export declare function reconcileAssembly(assembly: Rc6PromptAssembly, outcome: AdaptationOutcome, tools: Rc6ToolsService, scope: unknown): Rc6PromptAssembly;
 //# sourceMappingURL=agent-shell.d.ts.map
