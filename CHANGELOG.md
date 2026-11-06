@@ -2,6 +2,85 @@
 
 All notable changes to `dsh-shell-selector` are documented in this file.
 
+## [0.2.4] — unreleased
+
+Fixes the two failures a real DSH 0.2.2-rc.1 install produced after installing
+this plugin from a checkout:
+
+```
+启用失败: dsh: warning: 1 entry did not activate bash-sandbox
+(@deepseek-ai/dsh-bash-sandbox): Error: service "shell" has been registered
+at <SandboxPwshExecutor>
+
+新建会话失败: agent-preset/invalid: tool-pwsh (@deepseek-ai/dsh-tool-pwsh):
+waiting for shell
+```
+
+### Fixes
+
+- **The plugin adapted to the shell its CONFIGURATION predicted, not the shell
+  the host COMPOSED.** `apply()` resolved `activeKind` from the settings row and
+  a local detection sweep, and never read `ctx.shell`. Those two answers are
+  equal on a healthy install and diverge exactly when this plugin's bundle patch
+  did not load — e.g. the package is a profile dependency but absent from
+  `dsh.profile.bundles`, which leaves both executor rows on the shipped platform
+  rule. In that state `mode: fallback` selected Git Bash locally while the
+  process really ran `SandboxPwshExecutor`, so the adaptation hid the one
+  working tool (`pwsh`), mounted `bash` against a PowerShell executor, and
+  `tool-pwsh` never activated:
+  `agent-preset/invalid: tool-pwsh … waiting for shell`. `src/compat/executor-probe.ts`
+  now reads the service (`SandboxBashExecutor` / `SandboxPwshExecutor` /
+  `PwshLocalExecutor`, plus the resolved executable to tell PowerShell 7 from
+  Windows PowerShell), the snapshot reports the composed shell, and a mismatch
+  is reported once per process with an actionable message naming
+  `dsh.profile.bundles`.
+- **The late correction now reaches every consumer.** The plugin's row is
+  composed before the executor rows, so `ctx.shell` becomes observable one step
+  after `apply()`. The state endpoint reads the snapshot through the corrected
+  boot facts instead of a value captured at registration, and the agent adapter
+  resolves the active kind when an agent is created instead of at plugin load.
+  Without this, the probe could correctly notice `SandboxBashExecutor` while the
+  UI and every new agent still used the stale `pwsh` prediction.
+- **A wrong target could delete a working shell.** The adaptation mounted the
+  target dialect and then restricted the opposite without checking that the
+  target matched the composed executor — so a bad guess removed the only usable
+  tool. `adaptAgentShell()` now returns `noop-mismatch` and performs **zero**
+  side effects when the target contradicts `ctx.shell`: no mount, no
+  restriction, no prompt shadow. The preset keeps whatever it granted, which is
+  never worse than not installing this plugin. `noop-*` outcomes now return the
+  host's assembly untouched instead of reconciling a surface that was
+  deliberately left alone.
+- **The two executor rows could both enable, or both disable.** `ctx.shell` is a
+  single-implementation service, so exactly one of `bash-sandbox` /
+  `pwsh-sandbox` may be active. Their `disabled` expressions were complementary
+  only while two INDEPENDENT probes agreed, and each expression re-ran the whole
+  helper block including a real `bash.exe` probe (two `spawnSync` calls per
+  candidate, 5 s timeout each, ~250 ms per evaluation, three evaluations per
+  boot). A disagreement enables both rows
+  (`service "shell" has been registered at <SandboxPwshExecutor>`) or neither.
+  The decision is now memoized on `globalThis[Symbol.for('dsh.shellSelector.decision')]`,
+  so whoever evaluates first probes and every other row reuses that one answer —
+  the pair is exclusive by construction, and a boot costs one probe instead of
+  three.
+
+### Added
+
+- `tests/executor-probe.test.ts`, `tests/apply-actual-shell.test.ts`, and new
+  suites in `tests/agent-shell.test.ts` / `tests/expressions.test.ts` pin the
+  composed-shell preference, the zero-side-effect mismatch path, and row
+  exclusivity for every decision kind.
+- `DECISION_CACHE_KEY` is exported so tests can seed and clear the memo.
+
+### Changed
+
+- `active.kind`, `activeMissing` and the per-agent adaptation now describe what
+  the process is RUNNING. `restartRequired` still compares configuration
+  decisions, so "saved but not yet in effect" keeps its original meaning.
+- Installation note: use the release tarball rather than `pnpm add <dir>`.
+  `link:` installs resolve this package's own `devDependencies` (`0.1.7-rc.1`
+  `@deepseek-ai/dsh-tool-*`) instead of the host runtime, which pnpm warns about
+  as *"The linked in dependency will not resolve the peer dependencies from the
+  target node_modules."*
 ## [0.2.3] — unreleased
 
 Compatibility with **DSH 0.2.2-rc.1**. One defect and one adaptation.

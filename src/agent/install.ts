@@ -52,18 +52,22 @@ function debugEnabled(): boolean {
  * Install the per-agent Shell Tool adaptation.
  *
  * @param ctx - the plugin context.
- * @param activeKind - the shell the host executor was composed with at boot.
+ * @param activeKind - the shell the host executor was composed with, or a
+ *   getter for it. The getter is what production passes: this plugin's row is
+ *   inserted before the executor rows, so the composed shell is corrected only
+ *   after `apply()`, and an agent created later must adapt to that correction.
  * @param options - test seams, forwarded to {@link adaptAgentShell}.
  * @returns a disposer for the lifecycle listener.
  */
 export function installAgentShellAdaptation(
   ctx: Context,
-  activeKind: ShellId,
+  activeKind: ShellId | (() => ShellId),
   options: AdaptAgentShellOptions = {},
 ): () => void {
   const verbose = debugEnabled()
 
   return onAgentCreated(ctx, (agent) => {
+    const kind = typeof activeKind === 'function' ? activeKind() : activeKind
     const label = agent.id === undefined ? 'agent' : `agent "${agent.id}"`
     const debug = (message: string): void => {
       if (verbose) ctx.logger.debug('dsh-shell-selector: %s: %s', label, message)
@@ -75,7 +79,7 @@ export function installAgentShellAdaptation(
     //
     // The listener must stay synchronous and non-throwing: 0.2.2-rc.1 awaits
     // it through `ctx.serial`, so a rejection here would fail agent creation.
-    const adaptation = adaptAgentShell(agent as AgentLike, activeKind, { ...options, debug })
+    const adaptation = adaptAgentShell(agent as AgentLike, kind, { ...options, debug })
     // The rejection is re-raised by the barrier, which is the awaited path.
     // This handler only stops it from being an unhandled rejection when an
     // agent never assembles a prompt.
@@ -93,7 +97,7 @@ export function installAgentShellAdaptation(
         // downstream "no platform shell in catalog".
         if (error instanceof ShellSelectorAgentAdaptationError) throw error
         throw new ShellSelectorAgentAdaptationError(
-          activeKind === 'bash' ? 'bash' : 'pwsh',
+          kind === 'bash' ? 'bash' : 'pwsh',
           String((error as Error)?.message ?? error),
           { cause: error },
         )
@@ -103,6 +107,8 @@ export function installAgentShellAdaptation(
       // which carries `sections`/`contexts`/`variables` and — depending on the
       // version — `tools`. Reconcile tolerates every shape.
       const assembled: Rc6PromptAssembly = await next()
+      // A no-op adaptation leaves the host's assembly authoritative.
+      if (outcome.kind !== 'adapted') return assembled
       const tools = toolsOf(agent.ctx)
       if (tools === undefined) return assembled
       return reconcileAssembly(assembled, outcome, tools, scope)

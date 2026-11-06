@@ -20,6 +20,16 @@ export interface SnapshotInput {
     };
     /** The boot decision (resolved from the boot config). */
     decision: EffectiveDecision;
+    /**
+     * The shell the host actually composed, when it could be observed.
+     *
+     * `decision` describes what the CONFIGURATION asked for; this describes what
+     * `ctx.shell` really is. They diverge when this plugin's bundle patch did not
+     * load (the package is installed but missing from `dsh.profile.bundles`), and
+     * the snapshot must report the truth — it feeds "currently active", the
+     * `activeMissing` check and the per-agent adaptation.
+     */
+    kind?: ShellId;
     /** Executable the active executor resolves to, when known. */
     executable?: string | undefined;
 }

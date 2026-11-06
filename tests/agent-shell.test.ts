@@ -280,6 +280,67 @@ describe('two agents in parallel', () => {
   })
 })
 
+describe('dialect consistency (D2)', () => {
+  /** A host whose `ctx.shell` reports a specific composed executor. */
+  function hostWithExecutor(executor: 'bash' | 'pwsh', inherited: string[]): FakeHost {
+    const host = fakeAgentHost({ inherited })
+    const shellObject =
+      executor === 'bash'
+        ? Object.create({ constructor: { name: 'SandboxBashExecutor' } })
+        : Object.create({ constructor: { name: 'SandboxPwshExecutor' } })
+    ;(host.agent.ctx as unknown as Record<string, unknown>)['shell'] = shellObject
+    return host
+  }
+
+  it('refuses to adapt when the target contradicts the composed executor', async () => {
+    // The plugin was told "bash", the host composed pwsh. Hiding `pwsh` here is
+    // what produced `tool-pwsh ... waiting for shell`.
+    const host = hostWithExecutor('pwsh', ['bash', 'pwsh'])
+    const outcome = await adaptAgentShell(host.agent, 'bash', { loadToolPlugin: host.loadToolPlugin })
+
+    expect(outcome).toEqual({ kind: 'noop-mismatch', target: 'bash', composed: 'pwsh' })
+  })
+
+  it('leaves zero side effects on mismatch', async () => {
+    const host = hostWithExecutor('pwsh', ['bash', 'pwsh'])
+    await adaptAgentShell(host.agent, 'bash', { loadToolPlugin: host.loadToolPlugin })
+
+    expect(host.mounted).toEqual([])
+    expect(host.restrictions).toEqual([])
+    expect(host.shadowedSections).toEqual([])
+    expect(host.order).toEqual([])
+    // The working shell tool is still there.
+    expect(host.visible().has('pwsh')).toBe(true)
+  })
+
+  it('adapts normally when the target agrees with the composed executor', async () => {
+    const host = hostWithExecutor('pwsh', ['bash'])
+    const outcome = await adaptAgentShell(host.agent, 'pwsh', { loadToolPlugin: host.loadToolPlugin })
+    expect(outcome.kind).toBe('adapted')
+    expect(host.visible().has('pwsh')).toBe(true)
+    expect(host.visible().has('bash')).toBe(false)
+  })
+
+  it('adapts normally when no executor is observable', async () => {
+    // No `shell` service: the configured decision is the best answer available.
+    const host = fakeAgentHost({ inherited: ['bash'] })
+    const outcome = await adaptAgentShell(host.agent, 'pwsh', { loadToolPlugin: host.loadToolPlugin })
+    expect(outcome.kind).toBe('adapted')
+  })
+
+  it('treats Windows PowerShell as agreeing with the pwsh target', async () => {
+    // PowerShell 7 and Windows PowerShell share ONE model-facing tool.
+    const host = fakeAgentHost({ inherited: ['bash'] })
+    const shellObject = Object.create({
+      constructor: { name: 'PwshLocalExecutor' },
+      pwshPath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    })
+    ;(host.agent.ctx as unknown as Record<string, unknown>)['shell'] = shellObject
+    const outcome = await adaptAgentShell(host.agent, 'powershell', { loadToolPlugin: host.loadToolPlugin })
+    expect(outcome.kind).toBe('adapted')
+  })
+})
+
 describe('no-shell presets are never escalated', () => {
   it.each(['bash', 'pwsh', 'powershell'] as const)(
     'leaves a read/write/edit preset without a shell when the selector is %s',

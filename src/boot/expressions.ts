@@ -324,8 +324,48 @@ export const EXPRESSION_HELPERS = String.raw`(() => {
     if (cfg.mode === 'explicit' && cfg.shell === 'bash') return dshSsrHasBash() ? { kind: 'bash' } : { kind: 'platform' };
     return { kind: 'platform' };
   };
-  const eff = dshSsrEffective();
+  // ONE decision per process, shared by every row that needs it.
+  //
+  // The three '!!js' rows are evaluated independently, and before 0.2.4 each
+  // re-ran the whole helper block — including a real bash.exe probe (two
+  // spawnSync calls per candidate, 5 s timeout each). Two probes can disagree
+  // (timeout, transient EAGAIN, a PATH change between rows), and
+  // bash-sandbox.disabled / pwsh-sandbox.disabled are only complementary
+  // while they agree. A disagreement enables BOTH executors
+  // ('service "shell" has been registered at <SandboxPwshExecutor>') or NEITHER
+  // ('tool-pwsh ... waiting for shell' -> 'agent-preset/invalid').
+  //
+  // Memoizing on globalThis makes the pair exclusive BY CONSTRUCTION: whoever
+  // evaluates first probes, everyone else reuses. Symbol.for is global so the
+  // key survives the module boundary between the Loader and this package.
+  const dshSsrDecisionKey = Symbol.for('dsh.shellSelector.decision');
+  const dshSsrDecision = () => {
+    let cached;
+    try {
+      cached = globalThis[dshSsrDecisionKey];
+    } catch (err) {}
+    if (cached !== undefined && cached !== null && typeof cached === 'object') return cached;
+    const value = dshSsrEffective();
+    try {
+      globalThis[dshSsrDecisionKey] = value;
+    } catch (err) {}
+    return value;
+  };
+  const eff = dshSsrDecision();
 `
+
+/**
+ * The `globalThis` key the rendered expressions memoize their decision under.
+ *
+ * Exported so tests can seed a decision (asserting the rows are complementary
+ * for EVERY decision, not just the ones this machine can probe) and clear it
+ * between cells (each cell fabricates a different world).
+ *
+ * `Symbol.for` rather than a module-local symbol: the Loader evaluates the
+ * rendered strings in its own realm and must see the same key this module and
+ * the tests use.
+ */
+export const DECISION_CACHE_KEY: symbol = Symbol.for('dsh.shellSelector.decision')
 
 /**
  * `bash-sandbox.disabled` — enable Bash exactly when the decision says Bash.

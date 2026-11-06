@@ -1,6 +1,6 @@
 {
   "name": "dsh-shell-selector",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Choose which shell interpreter DeepSeek Harness runs commands with (Bash / PowerShell 7 / Windows PowerShell). Changes apply on the next DeepSeek Harness restart.",
   "keywords": [
     "deepseek",

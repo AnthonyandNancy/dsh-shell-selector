@@ -33,8 +33,13 @@ export const ACTION_ROUTE = '/_dsh/shell-selector/action'
 export interface ShellSelectorBackend {
   pluginVersion: string
   platform: string
-  snapshot: ActiveShell
-  snapshotDecision: EffectiveDecision
+  /**
+   * The runtime snapshot. A getter, not a value: the composed shell can become
+   * observable one composition step after `apply()`, when the executor row
+   * activates, and the already-installed routes must report that correction.
+   */
+  snapshot(): ActiveShell
+  snapshotDecision(): EffectiveDecision
   settings: {
     get(): ShellSelectorSettings
     replace(section: ShellSelectorSettings, expectedRevision?: number): Promise<void>
@@ -112,14 +117,16 @@ export function buildState(
   const configured = configuredOverride ?? backend.settings.get()
   const availability = backend.availability()
   const next = resolveEffective(configured, backend.platform, availability)
-  const activeMissing = !availability[backend.snapshot.kind]
+  const snapshot = backend.snapshot()
+  const snapshotDecision = backend.snapshotDecision()
+  const activeMissing = !availability[snapshot.kind]
   const configuredMissing = next.reason === 'explicit-unavailable'
-  const restartRequired = !decisionsEqual(backend.snapshotDecision, next, backend.platform)
+  const restartRequired = !decisionsEqual(snapshotDecision, next, backend.platform)
   return {
     schemaVersion: 1,
     platform: backend.platform,
     pluginVersion: backend.pluginVersion,
-    active: backend.snapshot,
+    active: snapshot,
     configured: { mode: configured.mode, ...(configured.shell === undefined ? {} : { shell: configured.shell }) },
     detected: backend.detected(),
     restartRequired,

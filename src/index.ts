@@ -27,6 +27,7 @@ import { dirname, delimiter } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { SHELL_SELECTOR_ENTRY_ID, configFromEntry, type ShellSelectorSettings } from './settings.js'
 import { settingsOf } from './compat/settings-surface.js'
+import { detectComposedShell } from './compat/executor-probe.js'
 import { bashAvailability, pwshAvailability, windowsPowerShellAvailability } from './detector.js'
 import { resolveEffective, resolvedShellKind, type EffectiveDecision, type ShellId } from './resolver.js'
 import { createRuntimeSnapshot } from './runtime-snapshot.js'
@@ -51,6 +52,15 @@ interface BootFacts {
   decision: EffectiveDecision
   /** The shell the host executor actually provides. */
   activeKind: ShellId
+  /**
+   * The composed shell as observed through `ctx.shell`, or `undefined` when the
+   * service was not yet available on the apply that froze these facts.
+   *
+   * `undefined` here is what allows a one-time upgrade (see
+   * `upgradeBootFacts`): the facts stay frozen for configuration changes, but
+   * the first observation of the real service corrects the shell identity.
+   */
+  composed: ShellId | undefined
   /** The immutable UI snapshot derived from the two above. */
   snapshot: ActiveShell
 }
@@ -65,9 +75,13 @@ interface BootFacts {
  */
 let bootFacts: BootFacts | undefined
 
+/** Whether the composition mismatch has already been reported in this process. */
+let warnedCompositionMismatch = false
+
 /** Drop the frozen boot facts (tests; a running application never calls this). */
 export function resetBootFacts(): void {
   bootFacts = undefined
+  warnedCompositionMismatch = false
 }
 
 function readPluginVersion(): string {
@@ -79,38 +93,87 @@ function readPluginVersion(): string {
   }
 }
 
-/** Resolve the executable the ACTIVE executor uses, for the snapshot. */
+/**
+ * Resolve the executable the ACTIVE executor uses, for the snapshot.
+ *
+ * Keyed on the composed shell rather than on the decision: when the two
+ * disagree the snapshot has to describe the process that is running.
+ */
 function snapshotExecutable(
   platform: string,
-  decision: EffectiveDecision,
+  activeKind: ShellId,
   bashPath: string | undefined,
   pwshPath: string | undefined,
   powershellPath: string | undefined,
 ): string | undefined {
-  if (decision.kind === 'bash') return bashPath
-  if (decision.kind === 'pwsh') return pwshPath
-  if (decision.kind === 'powershell') return powershellPath
-  // Platform default: the executor's own resolution — pwsh on Windows, bash elsewhere.
+  if (activeKind === 'bash') return bashPath
+  if (activeKind === 'pwsh') return pwshPath
+  if (activeKind === 'powershell') return powershellPath
+  // Unreachable: `resolvedShellKind` never returns 'platform'. Kept total so a
+  // future ShellId cannot silently produce an undefined executable.
   return platform === 'win32' ? pwshPath : bashPath
 }
 
 /** Capture the boot facts once per process. */
-function captureBootFacts(platform: string, config: ShellSelectorSettings, detection: DetectionCache): BootFacts {
+function captureBootFacts(
+  platform: string,
+  config: ShellSelectorSettings,
+  detection: DetectionCache,
+  composed: ShellId | undefined,
+): BootFacts {
   const decision = resolveEffective(config, platform, detection.availability())
-  const activeKind = resolvedShellKind(decision, platform)
+  const expectedKind = resolvedShellKind(decision, platform)
+  const activeKind = composed ?? expectedKind
   const snapshot = createRuntimeSnapshot({
     platform,
     config,
     decision,
+    kind: activeKind,
     executable: snapshotExecutable(
       platform,
-      decision,
+      activeKind,
       bashAvailability(platform).path,
       pwshAvailability().path,
       windowsPowerShellAvailability(platform).path,
     ),
   })
-  return { config, decision, activeKind, snapshot }
+  return { config, decision, activeKind, composed, snapshot }
+}
+
+/**
+ * Correct the frozen shell identity the first time the real `ctx.shell` becomes
+ * visible.
+ *
+ * The facts are frozen so a settings save (which re-enters `apply()`) cannot
+ * redefine what this process booted with. That freeze is about the
+ * CONFIGURATION; the composed shell is a different fact, and it can become
+ * observable one apply later than the first. This upgrades exactly once —
+ * `composed` is set afterwards, so later applies leave the facts alone.
+ *
+ * @param platform - `process.platform`.
+ * @param composed - the shell `ctx.shell` reports, when it is recognisable.
+ */
+function upgradeBootFacts(platform: string, composed: ShellId | undefined): void {
+  if (composed === undefined) return
+  if (bootFacts === undefined || bootFacts.composed !== undefined) return
+  bootFacts = {
+    ...bootFacts,
+    activeKind: composed,
+    composed,
+    snapshot: createRuntimeSnapshot({
+      platform,
+      config: bootFacts.config,
+      decision: bootFacts.decision,
+      kind: composed,
+      executable: snapshotExecutable(
+        platform,
+        composed,
+        bashAvailability(platform).path,
+        pwshAvailability().path,
+        windowsPowerShellAvailability(platform).path,
+      ),
+    }),
+  }
 }
 
 /**
@@ -145,17 +208,63 @@ export function apply(ctx: Context, rawConfig?: unknown): () => void {
   const platform = process.platform
   const configured = configFromEntry(rawConfig)
   const detection = new DetectionCache(platform)
-  bootFacts ??= captureBootFacts(platform, configured, detection)
+
+  // What the host composed, when it is already visible. On a healthy install it
+  // is NOT yet: this plugin's row is inserted before the executor rows, so the
+  // first apply runs before `ctx.shell` exists. The configured decision is then
+  // the only available answer, and the observation below corrects it.
+  const composed = detectComposedShell(ctx)
+  bootFacts ??= captureBootFacts(platform, configured, detection, composed)
+  upgradeBootFacts(platform, composed)
   const facts = bootFacts
 
-  prepareBashPath(platform, facts.activeKind)
+  /**
+   * Report "configuration predicted one shell, host composed another".
+   *
+   * This is a deployment mistake (the package is missing from
+   * `dsh.profile.bundles`, or it was installed through a `link:` spec), not a
+   * per-save event, so it is reported at most once per process.
+   */
+  const reportMismatch = (): void => {
+    const current = bootFacts
+    if (current === undefined || current.composed === undefined) return
+    if (warnedCompositionMismatch) return
+    const expectedKind = resolvedShellKind(current.decision, platform)
+    if (expectedKind === current.activeKind) return
+    warnedCompositionMismatch = true
+    ctx.logger.warn(
+      'dsh-shell-selector: the boot patch did not take effect (configuration expects %s, the host composed %s). ' +
+        'Running with the host shell; add this package to dsh.profile.bundles so the selection applies, then restart.',
+      expectedKind,
+      current.activeKind,
+    )
+  }
+  reportMismatch()
+
+  // `ctx.shell` appears one composition step after this plugin loads, so observe
+  // it rather than reading it once. The effect disposes with the plugin.
+  ctx.inject(['shell'], (shellCtx) => {
+    shellCtx.effect(() => {
+      upgradeBootFacts(platform, detectComposedShell(shellCtx))
+      reportMismatch()
+      return () => {}
+    }, 'dsh-shell-selector: observe the composed shell')
+  })
+
+  // Read the corrected facts: an upgrade may already have run above, and a
+  // Windows process whose composed shell is bash must still get Git Bash on
+  // PATH even though the first prediction was the platform default.
+  prepareBashPath(platform, bootFacts?.activeKind ?? facts.activeKind)
 
   // Agent plane: each preset's composition decides WHETHER an agent holds the
   // standard Shell capability; this adaptation decides WHICH dialect it speaks.
   // It adds the target tool before removing the mismatched one, keeps the tool
   // schema and the prompt in step, and fails the session loudly rather than
   // letting an agent reach the model with a wrong or empty shell surface.
-  installAgentShellAdaptation(ctx, facts.activeKind)
+  // A getter: the composed shell may be corrected by the `ctx.shell`
+  // observation above before any agent exists, and each agent must adapt to
+  // that corrected shell rather than to the prediction frozen at load.
+  installAgentShellAdaptation(ctx, () => bootFacts?.activeKind ?? facts.activeKind)
 
   const settings = settingsOf(ctx)
   const revisionOf = (): number => {
@@ -166,8 +275,11 @@ export function apply(ctx: Context, rawConfig?: unknown): () => void {
   const backend: ShellSelectorBackend = {
     pluginVersion,
     platform,
-    snapshot: facts.snapshot,
-    snapshotDecision: facts.decision,
+    // Read through `bootFacts` rather than the `facts` local: a late
+    // `ctx.inject(['shell'])` corrects the process-wide facts, and these routes
+    // were registered before that observation could run.
+    snapshot: () => bootFacts?.snapshot ?? facts.snapshot,
+    snapshotDecision: () => bootFacts?.decision ?? facts.decision,
     settings: {
       // The live value is the row the Loader last resolved for THIS fiber; a
       // save reconciles the entry and re-enters apply() with the new value.
@@ -194,11 +306,12 @@ export function apply(ctx: Context, rawConfig?: unknown): () => void {
   // Kick the version probe in the background; state stays available immediately.
   void detection.refresh(platform).catch(() => {})
 
+  const logged = bootFacts?.snapshot ?? facts.snapshot
   ctx.logger.info(
     'dsh-shell-selector: active shell %s (mode %s)%s; restartRequired on next settings change.',
-    facts.snapshot.kind,
-    facts.snapshot.mode,
-    facts.snapshot.shell === undefined ? '' : `, shell ${facts.snapshot.shell}`,
+    logged.kind,
+    logged.mode,
+    logged.shell === undefined ? '' : `, shell ${logged.shell}`,
   )
 
   return () => {

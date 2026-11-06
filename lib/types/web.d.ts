@@ -26,8 +26,13 @@ export declare const ACTION_ROUTE = "/_dsh/shell-selector/action";
 export interface ShellSelectorBackend {
     pluginVersion: string;
     platform: string;
-    snapshot: ActiveShell;
-    snapshotDecision: EffectiveDecision;
+    /**
+     * The runtime snapshot. A getter, not a value: the composed shell can become
+     * observable one composition step after `apply()`, when the executor row
+     * activates, and the already-installed routes must report that correction.
+     */
+    snapshot(): ActiveShell;
+    snapshotDecision(): EffectiveDecision;
     settings: {
         get(): ShellSelectorSettings;
         replace(section: ShellSelectorSettings, expectedRevision?: number): Promise<void>;
