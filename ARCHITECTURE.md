@@ -99,9 +99,16 @@ the restart requirement.
 - `executable` — the resolved executable path of the active executor, when
   known.
 
-The snapshot is immutable for the lifetime of the process. Availability is
-deliberately **not** part of the snapshot: whether the active executable still
-exists is a live fact, checked on every state read (`activeMissing`).
+The snapshot is immutable with respect to the **configuration**, but its
+`kind`/`executable` describe the shell the host actually composed. On a healthy
+install this plugin's row is composed before the executor rows, so the first
+`apply()` cannot see `ctx.shell`; the first later observation corrects those two
+fields once. The state endpoint reads the snapshot through the corrected boot
+facts, so a route registered during the first `apply()` reports the correction.
+
+Availability is deliberately **not** part of the snapshot: whether the active
+executable still exists is a live fact, checked on every state read
+(`activeMissing`).
 
 ## Pending configuration
 
@@ -291,6 +298,38 @@ and earlier) the previous correction still runs, so that line keeps working.
 decision became a per-agent executor plugin (`tools.setExecutor` /
 `selectExecutor`). `isNativeToolWire()` treats a missing probe as native, which
 is the conservative answer — the append branch is unreachable on 0.2.2 anyway.
+##### What the plugin adapts to
+
+`activeKind` is the shell the host **composed**, not the shell the configuration
+**predicted**. They agree on a healthy install and diverge when this plugin's
+bundle patch never loaded — a profile dependency absent from
+`dsh.profile.bundles` leaves both executor rows on the shipped platform rule.
+`src/compat/executor-probe.ts` reads `ctx.shell` (the service is single-provider,
+so its `SandboxBashExecutor` / `SandboxPwshExecutor` / `PwshLocalExecutor`
+identity is the fact), and `apply()` warns once when the two disagree.
+
+Because the executor rows activate after this plugin, `ctx.shell` is observed
+through `ctx.inject(['shell'], …)`. The first observation upgrades the boot
+facts once; the Settings endpoint resolves the snapshot lazily from those facts,
+and each new agent resolves the active kind when it is created. A value captured
+during the first `apply()` would otherwise keep the wrong prediction forever.
+
+The adaptation then guards itself: when the target dialect contradicts the
+composed executor it returns `noop-mismatch` and touches nothing. **An adapter
+may improve a composition; it may never take a working capability away.** A
+wrong target that mounts one dialect and restricts the other removes the only
+tool that runs, which is how `tool-pwsh … waiting for shell` becomes
+`agent-preset/invalid` and a session that cannot be created.
+
+##### Why the executor rows are complementary
+
+`ctx.shell` admits one implementation per context, so `bash-sandbox` and
+`pwsh-sandbox` are mutually exclusive. Each `!!js` expression is evaluated
+independently, so before 0.2.4 they were complementary only while two separate
+`bash.exe` probes agreed. The decision is now memoized on
+`globalThis[Symbol.for('dsh.shellSelector.decision')]`: the first evaluation
+probes, every other row reuses. The complement is structural, not coincidental,
+and a boot costs one probe instead of three.
 
 Because a preset registers its own `system-prompt/assemble` hook on the standing
 scope before any agent scope exists, this agent-scope barrier always runs nested
