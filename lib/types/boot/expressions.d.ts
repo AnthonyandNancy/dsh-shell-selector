@@ -43,6 +43,18 @@ export interface BootConfig {
  */
 export declare const EXPRESSION_HELPERS: string;
 /**
+ * The `globalThis` key the rendered expressions memoize their decision under.
+ *
+ * Exported so tests can seed a decision (asserting the rows are complementary
+ * for EVERY decision, not just the ones this machine can probe) and clear it
+ * between cells (each cell fabricates a different world).
+ *
+ * `Symbol.for` rather than a module-local symbol: the Loader evaluates the
+ * rendered strings in its own realm and must see the same key this module and
+ * the tests use.
+ */
+export declare const DECISION_CACHE_KEY: symbol;
+/**
  * `bash-sandbox.disabled` — enable Bash exactly when the decision says Bash.
  * `platform` keeps the shipped rule: disabled on Windows.
  */

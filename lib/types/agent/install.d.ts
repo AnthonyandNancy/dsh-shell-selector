@@ -36,9 +36,12 @@ import { type AdaptAgentShellOptions } from '../agent-shell.js';
  * Install the per-agent Shell Tool adaptation.
  *
  * @param ctx - the plugin context.
- * @param activeKind - the shell the host executor was composed with at boot.
+ * @param activeKind - the shell the host executor was composed with, or a
+ *   getter for it. The getter is what production passes: this plugin's row is
+ *   inserted before the executor rows, so the composed shell is corrected only
+ *   after `apply()`, and an agent created later must adapt to that correction.
  * @param options - test seams, forwarded to {@link adaptAgentShell}.
  * @returns a disposer for the lifecycle listener.
  */
-export declare function installAgentShellAdaptation(ctx: Context, activeKind: ShellId, options?: AdaptAgentShellOptions): () => void;
+export declare function installAgentShellAdaptation(ctx: Context, activeKind: ShellId | (() => ShellId), options?: AdaptAgentShellOptions): () => void;
 //# sourceMappingURL=install.d.ts.map

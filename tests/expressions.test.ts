@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   BASH_SANDBOX_DISABLED_EXPR,
+  DECISION_CACHE_KEY,
   PWSH_PATH_EXPR,
   PWSH_SANDBOX_DISABLED_EXPR,
 } from '../src/boot/expressions.js'
@@ -167,6 +168,10 @@ const CELLS: MatrixCell[] = [
 
 describe('boot expressions agree with the resolver mirror', () => {
   beforeEach(() => {
+    // The rendered expressions memoize ONE decision per process on globalThis.
+    // Every cell fabricates a different world, so the cache must not leak
+    // between them.
+    delete (globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY]
     root = mkdtempSync(join(tmpdir(), 'dsh-shell-selector-expr-'))
     home = join(root, 'home')
     settingsFile = join(home, 'settings.yaml')
@@ -218,6 +223,10 @@ describe('boot expressions agree with the resolver mirror', () => {
  */
 describe('the profile patch row as the configuration source', () => {
   beforeEach(() => {
+    // The rendered expressions memoize ONE decision per process on globalThis.
+    // Every cell fabricates a different world, so the cache must not leak
+    // between them.
+    delete (globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY]
     root = mkdtempSync(join(tmpdir(), 'dsh-shell-selector-row-'))
     home = join(root, 'home')
     settingsFile = join(home, 'settings.yaml')
@@ -288,5 +297,76 @@ describe('the profile patch row as the configuration source', () => {
     writeFileSync(patchPath, '- id: shell-selector\n  name: dsh-shell-selector\n')
     const env = buildEnv({ platform: 'win32', bash: true, pwsh: true })
     expect(enabled(BASH_SANDBOX_DISABLED_EXPR, env, ctx)).toBe(false)
+  })
+})
+
+/**
+ * The two executor rows must be MUTUALLY EXCLUSIVE.
+ *
+ * `ctx.shell` is a single-implementation service: a second provider throws
+ * `service "shell" has been registered at <SandboxPwshExecutor>`, and an absent
+ * provider leaves `tool-pwsh` stuck at `waiting for shell`, which makes
+ * `agent-preset/invalid` and fails session creation.
+ *
+ * The rows are only exclusive while both evaluate the SAME decision. Before
+ * 0.2.4 each ran its own `bash.exe` probe; two probes can disagree (5 s
+ * spawnSync timeout, transient EAGAIN, a PATH change between rows), and a
+ * disagreement enables both or neither. Memoizing the decision makes the pair
+ * complementary by construction.
+ */
+describe('executor rows are mutually exclusive for every decision', () => {
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'dsh-shell-selector-exclusive-'))
+    home = join(root, 'home')
+    settingsFile = join(home, 'settings.yaml')
+    ensureDirs(home)
+    delete (globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY]
+  })
+
+  afterEach(() => {
+    delete (globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY]
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  for (const kind of ['platform', 'bash', 'pwsh', 'powershell'] as const) {
+    it(`enables exactly one executor when the decision is ${kind}`, () => {
+      const env = buildEnv({ platform: 'win32', bash: true, pwsh: true, powershell: true })
+      // Seed the shared decision: this simulates the first row having already
+      // probed, which is exactly the state the second row must reuse.
+      ;(globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY] = { kind, reason: 'test' }
+
+      const bashDisabled = run(BASH_SANDBOX_DISABLED_EXPR, 'win32', env) === true
+      const pwshDisabled = run(PWSH_SANDBOX_DISABLED_EXPR, 'win32', env) === true
+
+      expect(bashDisabled).toBe(!pwshDisabled)
+      expect([bashDisabled, pwshDisabled].filter((disabled) => disabled === false)).toHaveLength(1)
+    })
+  }
+
+  it('reuses one decision across all three expressions (no extra probing)', () => {
+    const env = buildEnv({ platform: 'win32', bash: true })
+    writeSettings('shell-selector:\n  mode: fallback\n')
+    ;(globalThis as unknown as Record<symbol, unknown>)[DECISION_CACHE_KEY] = { kind: 'bash', reason: 'test' }
+
+    // A seeded decision must win even when the fabricated world has no pwsh and
+    // no Windows PowerShell: the rows read the decision, they do not re-probe.
+    expect(run(BASH_SANDBOX_DISABLED_EXPR, 'win32', env)).toBe(false)
+    expect(run(PWSH_SANDBOX_DISABLED_EXPR, 'win32', env)).toBe(true)
+    expect(run(PWSH_PATH_EXPR, 'win32', env)).toBeUndefined()
+  })
+
+  it('freezes the first evaluated decision even when the world changes between rows', () => {
+    // The Loader evaluates the rows independently. This models the exact race
+    // the memo exists to close: the first row decides bash, then the world
+    // changes so a fresh probe would say pwsh. The second row must still use
+    // the first decision, keeping the pair complementary.
+    const env = buildEnv({ platform: 'win32', bash: true })
+    writeSettings('shell-selector:\n  mode: fallback\n')
+    expect(run(BASH_SANDBOX_DISABLED_EXPR, 'win32', env)).toBe(false)
+
+    rmSync(join(root, 'bin', 'bash.exe'), { force: true })
+    writeFileSync(join(root, 'bin', 'pwsh.exe'), '')
+
+    expect(run(PWSH_SANDBOX_DISABLED_EXPR, 'win32', env)).toBe(true)
   })
 })

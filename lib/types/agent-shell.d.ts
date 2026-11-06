@@ -118,6 +118,22 @@ export type AdaptationOutcome = {
     /** The preset granted no shell; the selector added nothing. */
     kind: 'noop-no-capability';
 } | {
+    /**
+     * The shell this plugin wanted to enforce contradicts the executor the
+     * host actually composed. Nothing was changed.
+     *
+     * This is the guard that keeps a wrong guess harmless: hiding the
+     * mismatched dialect here would remove the only tool that works, which
+     * surfaces as `tool-pwsh ... waiting for shell` and then
+     * `agent-preset/invalid`. Leaving the preset untouched keeps whatever it
+     * granted — no worse than not having installed this plugin.
+     */
+    kind: 'noop-mismatch';
+    /** The tool this adaptation would have enforced. */
+    target: ShellToolName;
+    /** The shell the host actually composed. */
+    composed: ShellId;
+} | {
     kind: 'adapted';
     target: ShellToolName;
     opposite: ShellToolName;
