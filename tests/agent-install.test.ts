@@ -130,6 +130,27 @@ describe('installAgentShellAdaptation', () => {
     expect(host.visible()).toEqual(new Set(['read', 'write']))
   })
 
+  it('returns the host assembly untouched for a dialect mismatch', async () => {
+    // The composed executor is pwsh but the adapter was told bash: it must
+    // perform zero changes AND leave the two-tool assembly exactly as the host
+    // produced it, including the pwsh guidance the mismatch guard protects.
+    const host = fakeAgentHost({ inherited: ['bash', 'pwsh'] })
+    ;(host.agent.ctx as unknown as Record<string, unknown>)['shell'] = Object.create({
+      constructor: { name: 'SandboxPwshExecutor' },
+      pwshPath: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+    })
+    const { barriers } = announce(host, 'bash')
+
+    const hostAssembly = assembly(['bash', 'pwsh'])
+    const next = vi.fn(async () => hostAssembly)
+    const result = await barriers[0]!(assembly([]), {}, next)
+
+    expect(result).toBe(hostAssembly)
+    expect(host.mounted).toEqual([])
+    expect(host.restrictions).toEqual([])
+    expect(host.shadowedSections).toEqual([])
+  })
+
   it('is idempotent across repeated assemblies (one adaptation per agent)', async () => {
     const host = fakeAgentHost({ inherited: ['pwsh'] })
     const { barriers } = announce(host, 'bash')
@@ -141,5 +162,36 @@ describe('installAgentShellAdaptation', () => {
     expect(host.loadToolPlugin).toHaveBeenCalledTimes(1)
     expect(host.mounted).toEqual(['bash'])
     expect(host.restrictions).toHaveLength(1)
+  })
+
+  it('resolves the active kind when an agent is created, after a late correction', async () => {
+    // On a healthy boot this plugin's row loads BEFORE the executor rows, so
+    // the composed shell is still unknown at install time. The one-time
+    // correction lands before any agent is created; the adapter must use it,
+    // not the prediction captured when the plugin loaded.
+    const host = fakeAgentHost({ inherited: ['pwsh'] })
+    const { ctx, created } = fakeHostCtx()
+    const bars: AssembleListener[] = []
+    ;(host.agent.ctx as unknown as { on?: unknown }).on = (event: string, listener: AssembleListener) => {
+      if (event === 'system-prompt/assemble') bars.push(listener)
+      return () => {}
+    }
+    let corrected = false
+    const activeKind = (): 'bash' => {
+      // Reading at install time would freeze the pre-correction prediction.
+      if (!corrected) throw new Error('active kind read before the boot facts were corrected')
+      return 'bash'
+    }
+    installAgentShellAdaptation(ctx as never, activeKind as never, { loadToolPlugin: host.loadToolPlugin })
+
+    // The executor row activates and the boot facts are corrected before the
+    // agent exists.
+    corrected = true
+    for (const listener of created) listener({ agent: host.agent })
+    await bars[0]!(assembly(['pwsh']), {}, async () => assembly(['pwsh']))
+
+    // It adapted to the CORRECTED kind: bash mounted, pwsh removed.
+    expect(host.mounted).toEqual(['bash'])
+    expect(host.visible()).toEqual(new Set(['bash']))
   })
 })
