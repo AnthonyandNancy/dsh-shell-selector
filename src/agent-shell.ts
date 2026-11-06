@@ -32,6 +32,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { detectComposedShell } from './compat/executor-probe.js'
 import type { ShellId } from './resolver.js'
 import {
   SHELL_PROMPT_SECTION_ORDER,
@@ -244,6 +245,23 @@ export type AdaptationOutcome =
       kind: 'noop-no-capability'
     }
   | {
+      /**
+       * The shell this plugin wanted to enforce contradicts the executor the
+       * host actually composed. Nothing was changed.
+       *
+       * This is the guard that keeps a wrong guess harmless: hiding the
+       * mismatched dialect here would remove the only tool that works, which
+       * surfaces as `tool-pwsh ... waiting for shell` and then
+       * `agent-preset/invalid`. Leaving the preset untouched keeps whatever it
+       * granted — no worse than not having installed this plugin.
+       */
+      kind: 'noop-mismatch'
+      /** The tool this adaptation would have enforced. */
+      target: ShellToolName
+      /** The shell the host actually composed. */
+      composed: ShellId
+    }
+  | {
       kind: 'adapted'
       target: ShellToolName
       opposite: ShellToolName
@@ -298,6 +316,20 @@ export async function adaptAgentShell(
   const target = activeShellTool(activeKind)
   const opposite = oppositeShellTool(target)
   const loadToolPlugin = options.loadToolPlugin ?? importShellToolPlugin
+
+  // (0) DIALECT CONSISTENCY, before any side effect.
+  //
+  // `activeKind` is what this plugin decided; `ctx.shell` is what the host
+  // actually composed. When they disagree — a bundle patch that never loaded, a
+  // preset composed against a different executor — enforcing the target here
+  // would mount a tool the executor cannot run and then hide the one it can.
+  // Refusing is strictly better than damaging the preset: the preset's own
+  // grant keeps working, and the caller reports the mismatch instead.
+  const composed = detectComposedShell(agentCtx)
+  if (composed !== undefined && activeShellTool(composed) !== target) {
+    debug(`composed executor is ${composed} but the target is ${target}; not adapting`)
+    return { kind: 'noop-mismatch', target, composed }
+  }
 
   const rollback: Array<() => void> = []
   const undo = (): void => {
@@ -396,7 +428,11 @@ export function reconcileAssembly(
   tools: Rc6ToolsService,
   scope: unknown,
 ): Rc6PromptAssembly {
-  if (outcome.kind === 'noop-no-capability') return assembly
+  // Every no-op outcome means "this agent was left exactly as composed".
+  // Reconciling then would rewrite a surface the plugin deliberately did not
+  // touch — and `noop-mismatch` carries no `opposite`, so the destructuring
+  // below would not even be total.
+  if (outcome.kind !== 'adapted') return assembly
   const { target, opposite } = outcome
 
   // The guidance section is a plain array on every host version; the opposite
