@@ -1,0 +1,5 @@
+# Generated artefacts are compared byte-for-byte by scripts/lint.mjs, and the
+# renderer emits LF. Keep them LF in the worktree so the check is meaningful on
+# Windows too (core.autocrlf=true would otherwise rewrite them to CRLF).
+cordis.patch.yml text eol=lf
+lib/** text eol=lf
